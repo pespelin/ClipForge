@@ -1,5 +1,6 @@
 """SQLAlchemy ORM models; import models here so Alembic discovers them."""
 
 from app.models.video import Transcript, Video
+from app.models.video_analysis import AnalysisStatus, VideoAnalysis
 
-__all__ = ["Transcript", "Video"]
+__all__ = ["AnalysisStatus", "Transcript", "Video", "VideoAnalysis"]

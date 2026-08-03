@@ -13,11 +13,7 @@ def test_whisper_serializes_word_timestamps(tmp_path) -> None:
                         start=0.0,
                         end=1.0,
                         text=" hello",
-                        words=[
-                            SimpleNamespace(
-                                start=0.0, end=0.4, word=" hello", probability=0.9
-                            )
-                        ],
+                        words=[SimpleNamespace(start=0.0, end=0.4, word=" hello", probability=0.9)],
                     )
                 ]
             ),

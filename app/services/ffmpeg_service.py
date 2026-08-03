@@ -51,8 +51,18 @@ class FFmpegService:
         audio_path.parent.mkdir(parents=True, exist_ok=True)
         self._run(
             [
-                "ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000",
-                "-c:a", "pcm_s16le", str(audio_path),
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(audio_path),
             ]
         )
         if not audio_path.exists():
