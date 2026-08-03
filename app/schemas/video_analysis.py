@@ -39,6 +39,15 @@ class ClipCandidate(BaseModel):
         return self
 
 
+class VideoAnalysisResult(BaseModel):
+    summary: str = Field(min_length=1)
+    topics: list[TopicResult]
+    keywords: list[str]
+    sentiment: str | None = None
+    hook_candidates: list[HookCandidate]
+    clip_candidates: list[ClipCandidate]
+
+
 class VideoAnalysisStatusResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

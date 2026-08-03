@@ -10,6 +10,24 @@ class ResourceNotFoundError(AppError):
     detail = "Resource not found"
 
 
+class VideoNotFoundError(ResourceNotFoundError):
+    detail = "Video not found"
+
+
+class TranscriptNotReadyError(AppError):
+    status_code = 409
+    detail = "Video transcript is not ready"
+
+
+class AnalysisNotFoundError(ResourceNotFoundError):
+    detail = "Video analysis not found"
+
+
+class AnalysisProcessingError(AppError):
+    status_code = 422
+    detail = "Video analysis processing failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

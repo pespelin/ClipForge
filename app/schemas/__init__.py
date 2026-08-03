@@ -6,6 +6,7 @@ from app.schemas.video_analysis import (
     HookCandidate,
     TopicResult,
     VideoAnalysisResponse,
+    VideoAnalysisResult,
     VideoAnalysisStatusResponse,
 )
 
@@ -14,6 +15,7 @@ __all__ = [
     "HookCandidate",
     "TopicResult",
     "UploadResponse",
+    "VideoAnalysisResult",
     "VideoAnalysisResponse",
     "VideoAnalysisStatusResponse",
     "VideoMetadata",
