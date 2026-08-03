@@ -7,7 +7,7 @@ celery_app = Celery(
     "youtube_shorts",
     broker=settings.resolved_celery_broker_url,
     backend=settings.resolved_celery_result_backend,
-    include=["app.tasks"],
+    include=["app.tasks.video"],
 )
 celery_app.conf.update(
     task_serializer="json",

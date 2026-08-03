@@ -27,6 +27,11 @@ class Settings(BaseSettings):
 
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None
+    storage_root: str = "storage/videos"
+    max_upload_size_mb: int = 1024
+    whisper_model: str = "base"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
     openai_api_key: str | None = Field(default=None, repr=False)
     openai_base_url: str = "https://api.openai.com/v1"
     pexels_api_key: str | None = Field(default=None, repr=False)
