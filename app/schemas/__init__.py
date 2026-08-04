@@ -3,6 +3,8 @@
 from app.schemas.script import (
     ScriptGenerationOptions,
     ScriptGenerationRequest,
+    ScriptGenerationResult,
+    ScriptGeneratorInput,
     ScriptResponse,
     ScriptSection,
     ScriptStatusResponse,
@@ -21,7 +23,9 @@ __all__ = [
     "ClipCandidate",
     "HookCandidate",
     "ScriptGenerationOptions",
+    "ScriptGenerationResult",
     "ScriptGenerationRequest",
+    "ScriptGeneratorInput",
     "ScriptResponse",
     "ScriptSection",
     "ScriptStatusResponse",

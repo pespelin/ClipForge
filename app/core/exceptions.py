@@ -33,6 +33,30 @@ class AnalysisEnqueueError(AppError):
     detail = "Video analysis could not be queued"
 
 
+class CompletedAnalysisNotFoundError(AppError):
+    status_code = 409
+    detail = "Completed video analysis is required for script generation"
+
+
+class ScriptNotFoundError(ResourceNotFoundError):
+    detail = "Script not found"
+
+
+class InvalidHookCandidateIndexError(AppError):
+    status_code = 422
+    detail = "Preferred hook candidate index is out of range"
+
+
+class InvalidClipCandidateIndexError(AppError):
+    status_code = 422
+    detail = "Preferred clip candidate index is out of range"
+
+
+class ScriptGenerationError(AppError):
+    status_code = 422
+    detail = "Script generation failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

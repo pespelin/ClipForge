@@ -4,6 +4,8 @@ from typing import Annotated, Self
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.models.script import ScriptStatus, ScriptTone
+from app.schemas.video import VideoMetadata
+from app.schemas.video_analysis import ClipCandidate, HookCandidate, VideoAnalysisResult
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 LanguageCode = Annotated[
@@ -48,6 +50,27 @@ class ScriptSection(BaseModel):
         ):
             raise ValueError("source_end_time must be greater than source_start_time")
         return self
+
+
+class ScriptGeneratorInput(BaseModel):
+    video_id: str
+    video_analysis_id: int = Field(gt=0)
+    transcript: NonEmptyText
+    video_metadata: VideoMetadata | None = None
+    analysis: VideoAnalysisResult
+    options: ScriptGenerationOptions
+    selected_hook_candidate: HookCandidate | None = None
+    selected_clip_candidate: ClipCandidate | None = None
+
+
+class ScriptGenerationResult(BaseModel):
+    title: NonEmptyText
+    hook: NonEmptyText
+    body: NonEmptyText
+    call_to_action: NonEmptyText | None = None
+    full_script: NonEmptyText
+    estimated_duration_seconds: float | None = Field(default=None, ge=0)
+    sections: list[ScriptSection]
 
 
 class ScriptStatusResponse(BaseModel):
