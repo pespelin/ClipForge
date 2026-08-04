@@ -51,6 +51,7 @@ class FakeScriptRepository:
     def __init__(self) -> None:
         self.rows: list[Script] = []
         self.saved_statuses: list[ScriptStatus] = []
+        self.commits = 0
 
     async def create(self, script: Script) -> Script:
         script.id = len(self.rows) + 1
@@ -66,6 +67,9 @@ class FakeScriptRepository:
     async def save(self, script: Script) -> Script:
         self.saved_statuses.append(script.status)
         return script
+
+    async def commit(self) -> None:
+        self.commits += 1
 
 
 class FakeGenerator:
@@ -220,6 +224,76 @@ async def test_create_script_allows_multiple_variants() -> None:
     assert first.id != second.id
     assert first.video_analysis_id == second.video_analysis_id
     assert repository.rows == [first, second]
+
+
+async def test_request_script_generation_commits_pending_variant() -> None:
+    service, repository = make_service(video=completed_video(), analysis=completed_analysis())
+
+    script = await service.request_script_generation("video-1", generation_options())
+
+    assert script.status == ScriptStatus.PENDING
+    assert repository.commits == 1
+
+
+@pytest.mark.parametrize("state", [ScriptStatus.PENDING, ScriptStatus.FAILED])
+async def test_prepare_retry_reuses_row_and_commits_pending_state(state) -> None:
+    service, repository = make_service(video=completed_video(), analysis=completed_analysis())
+    existing = Script(
+        id=1,
+        video_id="video-1",
+        video_analysis_id=7,
+        status=state,
+        target_duration_seconds=45,
+        tone=ScriptTone.ENGAGING,
+        language="en",
+        generation_options=generation_options().model_dump(mode="json"),
+        error_message="Old failure",
+    )
+    repository.rows.append(existing)
+
+    result, should_enqueue = await service.prepare_script_retry(1)
+
+    assert result is existing
+    assert should_enqueue is True
+    assert existing.status == ScriptStatus.PENDING
+    assert existing.error_message is None
+    assert repository.commits == 1
+
+
+@pytest.mark.parametrize("state", [ScriptStatus.GENERATING, ScriptStatus.COMPLETED])
+async def test_prepare_retry_does_not_mutate_or_commit_active_script(state) -> None:
+    service, repository = make_service(video=completed_video(), analysis=completed_analysis())
+    existing = Script(
+        id=1,
+        video_id="video-1",
+        video_analysis_id=7,
+        status=state,
+        target_duration_seconds=45,
+        tone=ScriptTone.ENGAGING,
+        language="en",
+        generation_options=generation_options().model_dump(mode="json"),
+    )
+    repository.rows.append(existing)
+
+    result, should_enqueue = await service.prepare_script_retry(1)
+
+    assert result is existing
+    assert should_enqueue is False
+    assert repository.saved_statuses == []
+    assert repository.commits == 0
+
+
+async def test_mark_enqueue_failed_persists_and_commits_useful_error() -> None:
+    service, repository = make_service(video=completed_video(), analysis=completed_analysis())
+    existing = await service.create_script("video-1", generation_options())
+
+    await service.mark_script_enqueue_failed(existing, RuntimeError("broker unavailable"))
+
+    assert existing.status == ScriptStatus.FAILED
+    assert existing.completed_at is None
+    assert existing.error_message == "Script task enqueue failed: broker unavailable"
+    assert repository.saved_statuses == [ScriptStatus.FAILED]
+    assert repository.commits == 1
 
 
 async def test_create_script_rejects_missing_video() -> None:

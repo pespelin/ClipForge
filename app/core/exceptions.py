@@ -57,6 +57,11 @@ class ScriptGenerationError(AppError):
     detail = "Script generation failed"
 
 
+class ScriptEnqueueError(AppError):
+    status_code = 503
+    detail = "Script generation could not be queued"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

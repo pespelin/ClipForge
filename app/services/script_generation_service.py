@@ -58,6 +58,33 @@ class ScriptGenerationService:
             )
         )
 
+    async def request_script_generation(
+        self, video_id: str, options: ScriptGenerationOptions
+    ) -> Script:
+        script = await self.create_script(video_id, options)
+        await self.script_repository.commit()
+        return script
+
+    async def prepare_script_retry(self, script_id: int) -> tuple[Script, bool]:
+        script = await self.get_script(script_id)
+        if script.status in {ScriptStatus.COMPLETED, ScriptStatus.GENERATING}:
+            return script, False
+
+        script.status = ScriptStatus.PENDING
+        script.completed_at = None
+        script.error_message = None
+        await self.script_repository.save(script)
+        await self.script_repository.commit()
+        return script, True
+
+    async def mark_script_enqueue_failed(self, script: Script, error: Exception) -> None:
+        script.status = ScriptStatus.FAILED
+        script.completed_at = None
+        message = str(error).strip() or type(error).__name__
+        script.error_message = f"Script task enqueue failed: {message}"
+        await self.script_repository.save(script)
+        await self.script_repository.commit()
+
     async def process_script(self, script_id: int) -> Script:
         script = await self.get_script(script_id)
         if script.status == ScriptStatus.COMPLETED:

@@ -6,9 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.providers.analysis import LocalVideoAnalyzer
+from app.providers.script import LocalScriptGenerator
+from app.repositories.script_repository import ScriptRepository
 from app.repositories.video_analysis_repository import VideoAnalysisRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.ffmpeg_service import FFmpegService
+from app.services.script_generation_service import ScriptGenerationService
 from app.services.storage_service import StorageService
 from app.services.video_analysis_service import VideoAnalysisService
 from app.services.video_service import VideoService
@@ -42,4 +45,18 @@ def get_video_analysis_service(session: DatabaseSession) -> VideoAnalysisService
 
 VideoAnalysisServiceDependency = Annotated[
     VideoAnalysisService, Depends(get_video_analysis_service)
+]
+
+
+def get_script_generation_service(session: DatabaseSession) -> ScriptGenerationService:
+    return ScriptGenerationService(
+        video_repository=VideoRepository(session),
+        analysis_repository=VideoAnalysisRepository(session),
+        script_repository=ScriptRepository(session),
+        generator=LocalScriptGenerator(),
+    )
+
+
+ScriptGenerationServiceDependency = Annotated[
+    ScriptGenerationService, Depends(get_script_generation_service)
 ]
