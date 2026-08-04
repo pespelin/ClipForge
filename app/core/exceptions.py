@@ -28,6 +28,11 @@ class AnalysisProcessingError(AppError):
     detail = "Video analysis processing failed"
 
 
+class AnalysisEnqueueError(AppError):
+    status_code = 503
+    detail = "Video analysis could not be queued"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

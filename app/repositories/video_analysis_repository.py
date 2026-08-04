@@ -29,3 +29,6 @@ class VideoAnalysisRepository(BaseRepository[VideoAnalysis]):
     async def save(self, analysis: VideoAnalysis) -> VideoAnalysis:
         await self.session.flush()
         return analysis
+
+    async def commit(self) -> None:
+        await self.session.commit()

@@ -33,6 +33,7 @@ class FakeAnalysisRepository:
     def __init__(self, analysis: VideoAnalysis | None = None) -> None:
         self.analysis = analysis
         self.create_calls = 0
+        self.commit_calls = 0
         self.saved_statuses: list[AnalysisStatus] = []
 
     async def create(self, analysis: VideoAnalysis) -> VideoAnalysis:
@@ -49,6 +50,9 @@ class FakeAnalysisRepository:
         self.analysis = analysis
         self.saved_statuses.append(analysis.status)
         return analysis
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
 
 
 class FakeAnalyzer:
@@ -208,3 +212,36 @@ async def test_get_analysis_raises_when_analysis_is_missing() -> None:
 
     with pytest.raises(AnalysisNotFoundError):
         await service.get_analysis("video-1")
+
+
+async def test_request_analysis_reuses_failed_row_and_commits_pending_retry() -> None:
+    existing = VideoAnalysis(
+        video_id="video-1",
+        status=AnalysisStatus.FAILED,
+        error_message="Previous failure",
+        completed_at=None,
+    )
+    repository = FakeAnalysisRepository(existing)
+    service = make_service(completed_video(), repository, FakeAnalyzer(analysis_result()))
+
+    result, should_enqueue = await service.request_analysis("video-1")
+
+    assert result is existing
+    assert result.status == AnalysisStatus.PENDING
+    assert result.error_message is None
+    assert should_enqueue is True
+    assert repository.create_calls == 0
+    assert repository.commit_calls == 1
+
+
+async def test_mark_enqueue_failed_persists_useful_error() -> None:
+    existing = VideoAnalysis(video_id="video-1", status=AnalysisStatus.PENDING)
+    repository = FakeAnalysisRepository(existing)
+    service = make_service(completed_video(), repository, FakeAnalyzer(analysis_result()))
+
+    await service.mark_enqueue_failed(existing, RuntimeError("broker unavailable"))
+
+    assert existing.status == AnalysisStatus.FAILED
+    assert existing.error_message == "Analysis task enqueue failed: broker unavailable"
+    assert repository.saved_statuses == [AnalysisStatus.FAILED]
+    assert repository.commit_calls == 1

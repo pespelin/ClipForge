@@ -5,8 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.session import get_db_session
+from app.providers.analysis import LocalVideoAnalyzer
+from app.repositories.video_analysis_repository import VideoAnalysisRepository
+from app.repositories.video_repository import VideoRepository
 from app.services.ffmpeg_service import FFmpegService
 from app.services.storage_service import StorageService
+from app.services.video_analysis_service import VideoAnalysisService
 from app.services.video_service import VideoService
 from app.services.whisper_service import WhisperService
 
@@ -26,3 +30,16 @@ def get_video_service(session: DatabaseSession) -> VideoService:
 
 
 VideoServiceDependency = Annotated[VideoService, Depends(get_video_service)]
+
+
+def get_video_analysis_service(session: DatabaseSession) -> VideoAnalysisService:
+    return VideoAnalysisService(
+        video_repository=VideoRepository(session),
+        analysis_repository=VideoAnalysisRepository(session),
+        analyzer=LocalVideoAnalyzer(),
+    )
+
+
+VideoAnalysisServiceDependency = Annotated[
+    VideoAnalysisService, Depends(get_video_analysis_service)
+]

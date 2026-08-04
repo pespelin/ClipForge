@@ -37,6 +37,32 @@ class VideoAnalysisService:
             VideoAnalysis(video_id=video_id, status=AnalysisStatus.PENDING)
         )
 
+    async def request_analysis(self, video_id: str) -> tuple[VideoAnalysis, bool]:
+        video = await self._get_video(video_id)
+        self._verify_transcript_ready(video)
+        analysis = await self.analysis_repository.get_by_video_id(video_id)
+        if analysis is None:
+            analysis = await self.analysis_repository.create(
+                VideoAnalysis(video_id=video_id, status=AnalysisStatus.PENDING)
+            )
+        elif analysis.status == AnalysisStatus.FAILED:
+            analysis.status = AnalysisStatus.PENDING
+            analysis.completed_at = None
+            analysis.error_message = None
+            await self.analysis_repository.save(analysis)
+
+        should_enqueue = analysis.status == AnalysisStatus.PENDING
+        await self.analysis_repository.commit()
+        return analysis, should_enqueue
+
+    async def mark_enqueue_failed(self, analysis: VideoAnalysis, error: Exception) -> None:
+        analysis.status = AnalysisStatus.FAILED
+        analysis.completed_at = None
+        message = str(error).strip() or type(error).__name__
+        analysis.error_message = f"Analysis task enqueue failed: {message}"
+        await self.analysis_repository.save(analysis)
+        await self.analysis_repository.commit()
+
     async def process_analysis(self, video_id: str) -> VideoAnalysis:
         video = await self._get_video(video_id)
         self._verify_transcript_ready(video)
