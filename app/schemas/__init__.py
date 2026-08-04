@@ -1,5 +1,12 @@
 """Pydantic request and response contracts."""
 
+from app.schemas.script import (
+    ScriptGenerationOptions,
+    ScriptGenerationRequest,
+    ScriptResponse,
+    ScriptSection,
+    ScriptStatusResponse,
+)
 from app.schemas.video import UploadResponse, VideoMetadata, VideoStatusResponse
 from app.schemas.video_analysis import (
     ClipCandidate,
@@ -13,6 +20,11 @@ from app.schemas.video_analysis import (
 __all__ = [
     "ClipCandidate",
     "HookCandidate",
+    "ScriptGenerationOptions",
+    "ScriptGenerationRequest",
+    "ScriptResponse",
+    "ScriptSection",
+    "ScriptStatusResponse",
     "TopicResult",
     "UploadResponse",
     "VideoAnalysisResult",

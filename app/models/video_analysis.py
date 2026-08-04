@@ -20,6 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.script import Script
     from app.models.video import Video
 
 
@@ -75,3 +76,6 @@ class VideoAnalysis(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     video: Mapped[Video] = relationship(back_populates="analysis")
+    scripts: Mapped[list[Script]] = relationship(
+        back_populates="video_analysis", passive_deletes="all"
+    )
