@@ -1,6 +1,7 @@
 """Background task definitions."""
 
+from app.tasks.script_generation import generate_script
 from app.tasks.video import process_video
 from app.tasks.video_analysis import analyze_video
 
-__all__ = ["analyze_video", "process_video"]
+__all__ = ["analyze_video", "generate_script", "process_video"]
