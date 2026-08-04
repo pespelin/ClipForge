@@ -1,8 +1,9 @@
 # YouTube Shorts Automation Platform
 
-Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phase 3 implements
-video ingestion, transcription, and structured offline video analysis. Script generation and later
-content-production phases are not yet implemented.
+Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–4 implement
+backend infrastructure, video ingestion and transcription, structured video analysis, and
+deterministic offline Shorts script generation. Later content-production phases are not yet
+implemented.
 
 ## Architecture
 
@@ -23,6 +24,9 @@ Provider interfaces decouple application services from vendors. Video analysis c
 `LocalVideoAnalyzer`, a deterministic offline adapter intended for development and testing. It
 requires no API key or network access. Its frequency-based topics, fixed transcript windows, and
 small rule-based English sentiment vocabulary are not production-grade semantic analysis.
+Script generation similarly uses `LocalScriptGenerator`, an English-only deterministic adapter
+with fixed tone templates and word-budget duration estimates. It is a development fallback, not a
+production copywriting or translation system.
 
 ## Local setup
 
@@ -105,6 +109,58 @@ not call the analyzer again, and the database enforces one analysis row per vide
   and pending work can be safely re-enqueued, but a transactional outbox is not implemented.
 - Only the local analyzer is wired; external provider selection is intentionally deferred.
 
+## Script generation (Phase 4)
+
+A completed `VideoAnalysis` provides the structured input for script generation. A `Video` has one
+analysis and may have multiple `Script` rows; every script references both its source video and the
+specific analysis used to generate it. This supports multiple explicit variants with independent
+duration, tone, language, CTA, and preferred-candidate options without option-based deduplication.
+
+The HTTP request creates and commits a pending row before publishing the separate
+`scripts.generate` Celery task. The task opens the existing async database session and composes
+`VideoRepository`, `VideoAnalysisRepository`, `ScriptRepository`, `ScriptGenerationService`, and
+`LocalScriptGenerator`. Generation runs outside the HTTP request and persists structured hook,
+body, CTA, full-script, duration, and section results.
+
+The script state machine is:
+
+```text
+pending → generating → completed
+          ↖          ↘ failed
+          └── retry ──┘
+```
+
+Generator failures persist `failed`, clear `completed_at`, and retain a useful error message before
+the Celery task reports failure. Retrying a pending or failed script reuses the same database row;
+generating and completed scripts are not enqueued again.
+
+### Script API
+
+- `POST /api/v1/videos/{video_id}/scripts` creates a new pending variant, commits it, queues
+  `scripts.generate`, and returns `202 Accepted`.
+- `GET /api/v1/videos/{video_id}/scripts` lists variants newest first, returning compact status
+  objects for unfinished rows and full structured results for completed rows.
+- `GET /api/v1/scripts/{script_id}` returns the current status or complete generated script.
+- `POST /api/v1/scripts/{script_id}/retry` re-enqueues the same pending or failed row with
+  `202 Accepted`. Generating or completed rows return `200 OK` without duplicate publication.
+
+Each explicit create request is a new variant, even when its options match an existing variant.
+Conversely, task reruns and completed-script retries are idempotent: they do not call the generator
+again or create additional rows.
+
+### Script-generation limitations
+
+- `LocalScriptGenerator` supports English output only and raises an explicit error for unsupported
+  languages; it does not translate.
+- Tone adaptation uses transparent deterministic templates rather than semantic generation.
+- Spoken duration uses a fixed 150-words-per-minute estimate and is not frame-accurate.
+- Source timestamps come from selected analysis candidates when available and otherwise use safe,
+  duration-bounded fallbacks.
+- No external script provider or runtime provider-selection configuration is wired yet.
+- Database commits and Celery broker publication are not atomic. Synchronous publication failures
+  are persisted on the same script row, and retry is safe, but a process crash between commit and
+  publication can leave pending work unqueued. A transactional outbox is not implemented.
+
 ## Development commands
 
 ```bash
@@ -132,28 +188,13 @@ model as the application. Models must be imported through `app.models` for autog
 - Add migrations for every persisted-model change; do not create tables during API startup.
 - Put CPU- or long-running work behind Celery tasks; task functions should delegate to services.
 
-Future Roadmap
+## Roadmap
 
-Phase 1
-Backend Infrastructure
-
-Phase 2
-Video Ingestion
-
-Phase 3
-Video Analysis
-
-Phase 4
-Script Generation
-
-Phase 5
-Voice Generation
-
-Phase 6
-B-roll Retrieval
-
-Phase 7
-Video Rendering
-
-Phase 8
-Publishing
+- Phase 1 — Backend Infrastructure: complete
+- Phase 2 — Video Ingestion: complete
+- Phase 3 — Video Analysis: complete
+- Phase 4 — Script Generation: complete
+- Phase 5 — Voice Generation: planned
+- Phase 6 — B-roll Retrieval: planned
+- Phase 7 — Video Rendering: planned
+- Phase 8 — Publishing: planned
