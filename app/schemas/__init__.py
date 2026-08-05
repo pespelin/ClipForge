@@ -18,6 +18,13 @@ from app.schemas.video_analysis import (
     VideoAnalysisResult,
     VideoAnalysisStatusResponse,
 )
+from app.schemas.voice_track import (
+    VoiceGenerationOptions,
+    VoiceGenerationRequest,
+    VoiceSegment,
+    VoiceTrackResponse,
+    VoiceTrackStatusResponse,
+)
 
 __all__ = [
     "ClipCandidate",
@@ -36,4 +43,9 @@ __all__ = [
     "VideoAnalysisStatusResponse",
     "VideoMetadata",
     "VideoStatusResponse",
+    "VoiceGenerationOptions",
+    "VoiceGenerationRequest",
+    "VoiceSegment",
+    "VoiceTrackResponse",
+    "VoiceTrackStatusResponse",
 ]

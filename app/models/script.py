@@ -23,6 +23,7 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.video import Video
     from app.models.video_analysis import VideoAnalysis
+    from app.models.voice_track import VoiceTrack
 
 
 class ScriptStatus(StrEnum):
@@ -121,3 +122,6 @@ class Script(Base):
 
     video: Mapped[Video] = relationship(back_populates="scripts")
     video_analysis: Mapped[VideoAnalysis] = relationship(back_populates="scripts")
+    voice_tracks: Mapped[list[VoiceTrack]] = relationship(
+        back_populates="script", cascade="all, delete-orphan"
+    )
