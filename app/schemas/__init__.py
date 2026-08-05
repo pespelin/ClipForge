@@ -1,5 +1,14 @@
 """Pydantic request and response contracts."""
 
+from app.schemas.broll import (
+    BrollAssetCandidate,
+    BrollAssetResponse,
+    BrollAssetStatusResponse,
+    BrollCollectionResponse,
+    BrollCollectionStatusResponse,
+    BrollRetrievalOptions,
+    BrollRetrievalRequest,
+)
 from app.schemas.script import (
     ScriptGenerationOptions,
     ScriptGenerationRequest,
@@ -29,6 +38,13 @@ from app.schemas.voice_track import (
 )
 
 __all__ = [
+    "BrollAssetCandidate",
+    "BrollAssetResponse",
+    "BrollAssetStatusResponse",
+    "BrollCollectionResponse",
+    "BrollCollectionStatusResponse",
+    "BrollRetrievalOptions",
+    "BrollRetrievalRequest",
     "ClipCandidate",
     "HookCandidate",
     "ScriptGenerationOptions",
