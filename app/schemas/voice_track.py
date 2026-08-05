@@ -4,10 +4,11 @@ from typing import Annotated, Self
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.models.voice_track import AudioFormat, VoiceStyle, VoiceTrackStatus
-from app.schemas.script import LanguageCode
+from app.schemas.script import LanguageCode, NonEmptyText, ScriptSection
 
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 Checksum = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+StorageKey = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
 
 
 class VoiceGenerationOptions(BaseModel):
@@ -42,6 +43,30 @@ class VoiceGenerationRequest(BaseModel):
     options: VoiceGenerationOptions = Field(default_factory=VoiceGenerationOptions)
 
 
+class TTSInput(BaseModel):
+    voice_track_id: int = Field(gt=0)
+    script_id: int = Field(gt=0)
+    full_script: NonEmptyText
+    language: LanguageCode
+    provider: Identifier
+    voice: Identifier
+    style: VoiceStyle
+    audio_format: AudioFormat
+    sample_rate_hz: int = Field(ge=8000, le=192000)
+    speaking_rate: float = Field(ge=0.5, le=2.0)
+    pitch: float = Field(ge=-20.0, le=20.0)
+    volume_gain_db: float = Field(ge=-60.0, le=20.0)
+    script_sections: list[ScriptSection]
+
+
+class TTSResult(BaseModel):
+    storage_key: StorageKey
+    duration_seconds: float = Field(gt=0)
+    file_size_bytes: int = Field(ge=0)
+    checksum: Checksum | None = None
+    segments: list[VoiceSegment]
+
+
 class VoiceTrackStatusResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -64,7 +89,7 @@ class VoiceTrackResponse(VoiceTrackStatusResponse):
     volume_gain_db: float = Field(ge=-60.0, le=20.0)
     generation_options: VoiceGenerationOptions
     segments: list[VoiceSegment]
-    storage_key: str | None = None
+    storage_key: StorageKey | None = None
     duration_seconds: float | None = Field(default=None, ge=0)
     file_size_bytes: int | None = Field(default=None, ge=0)
     checksum: Checksum | None = None

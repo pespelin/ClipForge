@@ -62,6 +62,25 @@ class ScriptEnqueueError(AppError):
     detail = "Script generation could not be queued"
 
 
+class ScriptNotReadyError(AppError):
+    status_code = 409
+    detail = "Completed script is required for voice generation"
+
+
+class UnusableScriptContentError(AppError):
+    status_code = 422
+    detail = "Script content is not usable for voice generation"
+
+
+class VoiceTrackNotFoundError(ResourceNotFoundError):
+    detail = "Voice track not found"
+
+
+class VoiceGenerationError(AppError):
+    status_code = 422
+    detail = "Voice generation failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

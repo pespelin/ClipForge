@@ -19,6 +19,8 @@ from app.schemas.video_analysis import (
     VideoAnalysisStatusResponse,
 )
 from app.schemas.voice_track import (
+    TTSInput,
+    TTSResult,
     VoiceGenerationOptions,
     VoiceGenerationRequest,
     VoiceSegment,
@@ -37,6 +39,8 @@ __all__ = [
     "ScriptSection",
     "ScriptStatusResponse",
     "TopicResult",
+    "TTSInput",
+    "TTSResult",
     "UploadResponse",
     "VideoAnalysisResult",
     "VideoAnalysisResponse",

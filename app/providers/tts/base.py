@@ -1,10 +1,11 @@
-from abc import ABC, abstractmethod
-from pathlib import Path
+from typing import Protocol
+
+from app.schemas.voice_track import TTSInput, TTSResult
 
 
-class TTSProvider(ABC):
-    """Port for text-to-speech engines."""
+class TTSProvider(Protocol):
+    """Provider-neutral boundary for structured voice synthesis."""
 
-    @abstractmethod
-    async def synthesize(self, text: str, output_path: Path, *, voice: str | None = None) -> Path:
-        """Synthesize speech and return the generated audio path."""
+    async def synthesize(self, synthesis_input: TTSInput) -> TTSResult:
+        """Synthesize a voice artifact without exposing vendor-specific types."""
+        ...
