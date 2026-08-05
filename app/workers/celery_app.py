@@ -11,6 +11,7 @@ celery_app = Celery(
         "app.tasks.video",
         "app.tasks.video_analysis",
         "app.tasks.script_generation",
+        "app.tasks.voice_generation",
     ],
 )
 celery_app.conf.update(
