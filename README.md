@@ -1,9 +1,9 @@
 # YouTube Shorts Automation Platform
 
-Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–4 implement
+Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–5 implement
 backend infrastructure, video ingestion and transcription, structured video analysis, and
-deterministic offline Shorts script generation. Later content-production phases are not yet
-implemented.
+deterministic offline Shorts script and voice generation. Later content-production phases are not
+yet implemented.
 
 ## Architecture
 
@@ -27,6 +27,9 @@ small rule-based English sentiment vocabulary are not production-grade semantic 
 Script generation similarly uses `LocalScriptGenerator`, an English-only deterministic adapter
 with fixed tone templates and word-budget duration estimates. It is a development fallback, not a
 production copywriting or translation system.
+Voice generation uses `LocalTTSProvider`, which creates deterministic synthetic PCM WAV tones using
+only the Python standard library. It provides real artifacts for workflow development but does not
+produce human-like or intelligible speech.
 
 ## Local setup
 
@@ -66,6 +69,7 @@ The local storage adapter is configured with `STORAGE_ROOT` (default `storage/vi
 storage/videos/{video_id}/original.{mp4|mov|mkv|webm}
 storage/videos/{video_id}/audio.wav
 storage/videos/{video_id}/transcript.json
+storage/videos/voice/{voice_track_id}/audio.wav
 ```
 
 Both API and worker containers mount the application directory, so they share this storage during
@@ -161,6 +165,63 @@ again or create additional rows.
   are persisted on the same script row, and retry is safe, but a process crash between commit and
   publication can leave pending work unqueued. A transactional outbox is not implemented.
 
+## Voice generation (Phase 5)
+
+A completed `Script` may own multiple `VoiceTrack` rows. Each explicit create request produces a
+new voice variant linked to the same script, with an independent provider, voice label, style,
+language, audio format, sample rate, speaking rate, pitch, and volume-gain snapshot. Voice variants
+are never deduplicated by options.
+
+The API creates and commits a pending track before publishing the separate `voice.generate` Celery
+task. The task opens the existing async database session and composes `ScriptRepository`,
+`VoiceTrackRepository`, `VoiceGenerationService`, and `LocalTTSProvider`. The provider writes the
+artifact and returns validated duration, file size, SHA-256 checksum, storage key, and per-script-
+section audio timing. Only then does the task commit the completed row.
+
+The voice-track state machine is:
+
+```text
+pending → generating → completed
+          ↖          ↘ failed
+          └── retry ──┘
+```
+
+Generation failures persist `failed`, clear `completed_at`, and retain a useful error before the
+Celery task reports failure. Retrying pending or failed work reuses the same row; generating and
+completed tracks are returned without duplicate publication.
+
+### Voice API
+
+- `POST /api/v1/scripts/{script_id}/voice-tracks` creates a new pending variant, commits it, queues
+  `voice.generate`, and returns `202 Accepted`.
+- `GET /api/v1/scripts/{script_id}/voice-tracks` lists variants newest first, with compact status
+  objects for unfinished rows and full artifact results for completed rows.
+- `GET /api/v1/voice-tracks/{voice_track_id}` returns current status or the complete artifact
+  result.
+- `POST /api/v1/voice-tracks/{voice_track_id}/retry` re-enqueues the same pending or failed row with
+  `202 Accepted`. Generating or completed tracks return `200 OK` without duplicate publication.
+
+Completed task execution is idempotent: it does not invoke TTS again, alter the artifact, or create
+another row. Reprocessing a non-completed track may overwrite only its own deterministic artifact
+at `voice/{voice_track_id}/audio.wav`. `STORAGE_ROOT` defaults to `storage/videos`; API and worker
+containers share the project bind mount, so both resolve voice artifacts beneath the same root.
+
+### Local voice support and limitations
+
+- The wired provider identifier is `local`.
+- English and English region codes such as `en-US` are supported.
+- WAV is supported. MP3 is explicitly rejected rather than receiving mislabeled WAV bytes.
+- Voice labels and styles deterministically adjust synthetic tone frequency, cadence, and pauses.
+- Speaking rate, pitch, volume gain, and sample rate affect PCM generation, but timing is synthetic
+  and does not represent natural speech.
+- `LocalTTSProvider` is an offline development adapter, not a speech engine. Kokoro remains an
+  unimplemented placeholder, and no external provider selection is configured.
+- Database commit and broker publication are not atomic. A crash after commit but before publish
+  may leave pending work unqueued; synchronous broker failures are persisted and safely retryable.
+- Artifact writing and database transactions are also not atomic. A failed or interrupted write
+  can leave filesystem debris even though the database row is not committed as completed. Later
+  cleanup/reconciliation work can remove orphaned artifacts.
+
 ## Development commands
 
 ```bash
@@ -194,7 +255,7 @@ model as the application. Models must be imported through `app.models` for autog
 - Phase 2 — Video Ingestion: complete
 - Phase 3 — Video Analysis: complete
 - Phase 4 — Script Generation: complete
-- Phase 5 — Voice Generation: planned
+- Phase 5 — Voice Generation: complete
 - Phase 6 — B-roll Retrieval: planned
 - Phase 7 — Video Rendering: planned
 - Phase 8 — Publishing: planned
