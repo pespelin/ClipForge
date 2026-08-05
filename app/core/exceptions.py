@@ -81,6 +81,11 @@ class VoiceGenerationError(AppError):
     detail = "Voice generation failed"
 
 
+class VoiceEnqueueError(AppError):
+    status_code = 503
+    detail = "Voice generation could not be queued"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

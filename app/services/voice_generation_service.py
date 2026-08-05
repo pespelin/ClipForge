@@ -57,6 +57,36 @@ class VoiceGenerationService:
             )
         )
 
+    async def request_voice_generation(
+        self, script_id: int, options: VoiceGenerationOptions
+    ) -> VoiceTrack:
+        voice_track = await self.create_voice_track(script_id, options)
+        await self.voice_track_repository.commit()
+        return voice_track
+
+    async def prepare_voice_track_retry(self, voice_track_id: int) -> tuple[VoiceTrack, bool]:
+        voice_track = await self.get_voice_track(voice_track_id)
+        if voice_track.status in {
+            VoiceTrackStatus.COMPLETED,
+            VoiceTrackStatus.GENERATING,
+        }:
+            return voice_track, False
+
+        voice_track.status = VoiceTrackStatus.PENDING
+        voice_track.completed_at = None
+        voice_track.error_message = None
+        await self.voice_track_repository.save(voice_track)
+        await self.voice_track_repository.commit()
+        return voice_track, True
+
+    async def mark_voice_enqueue_failed(self, voice_track: VoiceTrack, error: Exception) -> None:
+        voice_track.status = VoiceTrackStatus.FAILED
+        voice_track.completed_at = None
+        message = str(error).strip() or type(error).__name__
+        voice_track.error_message = f"Voice generation task enqueue failed: {message}"
+        await self.voice_track_repository.save(voice_track)
+        await self.voice_track_repository.commit()
+
     async def process_voice_track(self, voice_track_id: int) -> VoiceTrack:
         voice_track = await self.get_voice_track(voice_track_id)
         if voice_track.status == VoiceTrackStatus.COMPLETED:

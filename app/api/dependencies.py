@@ -7,14 +7,17 @@ from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.providers.analysis import LocalVideoAnalyzer
 from app.providers.script import LocalScriptGenerator
+from app.providers.tts import LocalTTSProvider
 from app.repositories.script_repository import ScriptRepository
 from app.repositories.video_analysis_repository import VideoAnalysisRepository
 from app.repositories.video_repository import VideoRepository
+from app.repositories.voice_track_repository import VoiceTrackRepository
 from app.services.ffmpeg_service import FFmpegService
 from app.services.script_generation_service import ScriptGenerationService
 from app.services.storage_service import StorageService
 from app.services.video_analysis_service import VideoAnalysisService
 from app.services.video_service import VideoService
+from app.services.voice_generation_service import VoiceGenerationService
 from app.services.whisper_service import WhisperService
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db_session)]
@@ -59,4 +62,17 @@ def get_script_generation_service(session: DatabaseSession) -> ScriptGenerationS
 
 ScriptGenerationServiceDependency = Annotated[
     ScriptGenerationService, Depends(get_script_generation_service)
+]
+
+
+def get_voice_generation_service(session: DatabaseSession) -> VoiceGenerationService:
+    return VoiceGenerationService(
+        script_repository=ScriptRepository(session),
+        voice_track_repository=VoiceTrackRepository(session),
+        tts_provider=LocalTTSProvider(get_settings().storage_root),
+    )
+
+
+VoiceGenerationServiceDependency = Annotated[
+    VoiceGenerationService, Depends(get_voice_generation_service)
 ]

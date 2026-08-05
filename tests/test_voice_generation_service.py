@@ -34,6 +34,7 @@ class FakeVoiceTrackRepository:
     def __init__(self) -> None:
         self.rows: list[VoiceTrack] = []
         self.saved_statuses: list[VoiceTrackStatus] = []
+        self.commits = 0
 
     async def create(self, voice_track: VoiceTrack) -> VoiceTrack:
         voice_track.id = len(self.rows) + 1
@@ -49,6 +50,9 @@ class FakeVoiceTrackRepository:
     async def save(self, voice_track: VoiceTrack) -> VoiceTrack:
         self.saved_statuses.append(voice_track.status)
         return voice_track
+
+    async def commit(self) -> None:
+        self.commits += 1
 
 
 class FakeTTSProvider:
@@ -213,6 +217,58 @@ async def test_create_voice_track_allows_multiple_variants() -> None:
     assert first.voice == "voice-a"
     assert second.voice == "voice-b"
     assert repository.rows == [first, second]
+
+
+async def test_request_voice_generation_commits_pending_variant() -> None:
+    service, repository = make_service(script=completed_script())
+
+    track = await service.request_voice_generation(4, voice_options())
+
+    assert track.status == VoiceTrackStatus.PENDING
+    assert repository.commits == 1
+
+
+@pytest.mark.parametrize("state", [VoiceTrackStatus.PENDING, VoiceTrackStatus.FAILED])
+async def test_prepare_retry_reuses_row_and_commits_pending_state(state) -> None:
+    service, repository = make_service(script=completed_script())
+    existing = await service.create_voice_track(4, voice_options())
+    existing.status = state
+    existing.error_message = "Old failure"
+
+    result, should_enqueue = await service.prepare_voice_track_retry(existing.id)
+
+    assert result is existing
+    assert should_enqueue is True
+    assert existing.status == VoiceTrackStatus.PENDING
+    assert existing.error_message is None
+    assert repository.commits == 1
+
+
+@pytest.mark.parametrize("state", [VoiceTrackStatus.GENERATING, VoiceTrackStatus.COMPLETED])
+async def test_prepare_retry_does_not_mutate_or_commit_active_track(state) -> None:
+    service, repository = make_service(script=completed_script())
+    existing = await service.create_voice_track(4, voice_options())
+    existing.status = state
+
+    result, should_enqueue = await service.prepare_voice_track_retry(existing.id)
+
+    assert result is existing
+    assert should_enqueue is False
+    assert repository.saved_statuses == []
+    assert repository.commits == 0
+
+
+async def test_mark_enqueue_failed_persists_and_commits_useful_error() -> None:
+    service, repository = make_service(script=completed_script())
+    existing = await service.create_voice_track(4, voice_options())
+
+    await service.mark_voice_enqueue_failed(existing, RuntimeError("broker unavailable"))
+
+    assert existing.status == VoiceTrackStatus.FAILED
+    assert existing.completed_at is None
+    assert existing.error_message == "Voice generation task enqueue failed: broker unavailable"
+    assert repository.saved_statuses == [VoiceTrackStatus.FAILED]
+    assert repository.commits == 1
 
 
 async def test_create_voice_track_rejects_missing_script() -> None:
