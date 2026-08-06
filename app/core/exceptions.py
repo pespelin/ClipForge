@@ -86,6 +86,39 @@ class VoiceEnqueueError(AppError):
     detail = "Voice generation could not be queued"
 
 
+class BrollScriptNotReadyError(AppError):
+    status_code = 409
+    detail = "Completed script is required for B-roll retrieval"
+
+
+class BrollUnusableScriptError(AppError):
+    status_code = 422
+    detail = "Script content is not usable for B-roll retrieval"
+
+
+class BrollCollectionNotFoundError(ResourceNotFoundError):
+    detail = "B-roll collection not found"
+
+
+class BrollAssetNotFoundError(ResourceNotFoundError):
+    detail = "B-roll asset not found"
+
+
+class UnsupportedBrollQueryStrategyError(AppError):
+    status_code = 422
+    detail = "Unsupported B-roll query strategy"
+
+
+class BrollNoResultsError(AppError):
+    status_code = 422
+    detail = "No valid B-roll candidates were returned"
+
+
+class BrollRetrievalError(AppError):
+    status_code = 422
+    detail = "B-roll retrieval failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

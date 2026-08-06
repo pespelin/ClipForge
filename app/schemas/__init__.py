@@ -8,6 +8,8 @@ from app.schemas.broll import (
     BrollCollectionStatusResponse,
     BrollRetrievalOptions,
     BrollRetrievalRequest,
+    MediaCandidateResult,
+    MediaSearchInput,
 )
 from app.schemas.script import (
     ScriptGenerationOptions,
@@ -47,6 +49,8 @@ __all__ = [
     "BrollRetrievalRequest",
     "ClipCandidate",
     "HookCandidate",
+    "MediaCandidateResult",
+    "MediaSearchInput",
     "ScriptGenerationOptions",
     "ScriptGenerationResult",
     "ScriptGenerationRequest",
