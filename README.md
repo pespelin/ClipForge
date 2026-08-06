@@ -1,9 +1,9 @@
 # YouTube Shorts Automation Platform
 
-Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–5 implement
+Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–6 implement
 backend infrastructure, video ingestion and transcription, structured video analysis, and
-deterministic offline Shorts script and voice generation. Later content-production phases are not
-yet implemented.
+deterministic offline Shorts script, voice generation, and B-roll retrieval. Later
+content-production phases are not yet implemented.
 
 ## Architecture
 
@@ -30,6 +30,9 @@ production copywriting or translation system.
 Voice generation uses `LocalTTSProvider`, which creates deterministic synthetic PCM WAV tones using
 only the Python standard library. It provides real artifacts for workflow development but does not
 produce human-like or intelligible speech.
+The current `LocalMediaProvider` produces deterministic synthetic B-roll metadata with deliberately
+non-resolving `local.invalid` URLs. It supports offline workflow development but does not search,
+license, download, or store real media.
 
 ## Local setup
 
@@ -222,6 +225,83 @@ containers share the project bind mount, so both resolve voice artifacts beneath
   can leave filesystem debris even though the database row is not committed as completed. Later
   cleanup/reconciliation work can remove orphaned artifacts.
 
+## B-roll retrieval (Phase 6)
+
+A completed `Script` may own multiple `BrollCollection` retrieval variants, and each collection
+owns multiple `BrollAsset` candidate rows. Assets retain their source script-section order, so one
+section may have several ranked candidates while every explicit retrieval request remains an
+independent collection with its own options snapshot.
+
+The API creates and commits a pending collection before publishing the separate `broll.retrieve`
+Celery task. The worker uses the existing async session and composes `ScriptRepository`,
+`BrollCollectionRepository`, `BrollAssetRepository`, `BrollRetrievalService`, and
+`LocalMediaProvider`. The service deterministically derives section-keyword queries, validates
+provider-neutral candidates, suppresses duplicates, persists candidate assets, and completes the
+collection. No search runs inline in an HTTP request.
+
+The collection lifecycle is:
+
+```text
+pending → searching → completed
+          ↖         ↘ failed
+          └─ retry ──┘
+```
+
+Assets use the independent lifecycle `candidate`, `selected`, `downloaded`, `rejected`, or
+`failed`. Phase 6 creates candidates and supports explicit selection/rejection; it does not yet
+download assets or create storage keys. Selecting an asset does not reject its siblings, and more
+than one asset may remain selected for a script section.
+
+### B-roll API
+
+- `POST /api/v1/scripts/{script_id}/broll-collections` creates a new pending variant, commits it,
+  queues `broll.retrieve`, and returns `202 Accepted`.
+- `GET /api/v1/scripts/{script_id}/broll-collections` lists variants newest first, returning compact
+  status objects for unfinished collections and complete results with assets after completion.
+- `GET /api/v1/broll-collections/{collection_id}` returns current status or the completed collection
+  and its persisted assets.
+- `POST /api/v1/broll-collections/{collection_id}/retry` reuses a pending or failed row and returns
+  `202 Accepted`; searching or completed rows return `200 OK` without duplicate publication.
+- `GET /api/v1/broll-collections/{collection_id}/assets` lists assets by section order, descending
+  relevance, and stable ID order.
+- `GET /api/v1/broll-assets/{asset_id}` returns explicit candidate or artifact metadata.
+- `POST /api/v1/broll-assets/{asset_id}/select` and `/reject` update only the requested asset.
+
+Each create request intentionally produces a new collection, even when its options match another
+variant. Completed task reruns are idempotent and do not call the provider again. Retrying an
+unfinished collection preserves existing candidates; duplicate suppression uses provider and
+external ID first, normalized source URL second, and a stable provider-neutral hash as fallback.
+
+### Local media support and limitations
+
+- `LocalMediaProvider` supports synthetic video and image metadata for English and English regional
+  language codes.
+- Candidate IDs, dimensions, bounded video durations, relevance ordering, and metadata are
+  deterministic. Placeholder URLs use `https://local.invalid/...` and are intentionally not
+  downloadable.
+- The local provider marks results as safe synthetic placeholders. It performs no semantic media
+  search, licensing verification, network request, or file download.
+- Pexels, Pixabay, Unsplash, and other licensed providers are not integrated or configured.
+- Database commits and Celery publication are not atomic. Synchronous broker failures are persisted
+  on the same collection, but a crash after commit and before publication may leave pending work
+  unqueued. A transactional outbox is not implemented.
+
+The Phase 6 migration is part of the normal migration chain. Apply all migrations and verify the
+project with:
+
+```bash
+docker compose exec api uv run --no-sync alembic upgrade head
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+docker compose config
+docker compose ps
+curl --fail http://localhost:8000/api/v1/health
+```
+
+Host PostgreSQL remains available at `localhost:5433`; API and worker containers connect to
+PostgreSQL at `postgres:5432`.
+
 ## Development commands
 
 ```bash
@@ -256,6 +336,6 @@ model as the application. Models must be imported through `app.models` for autog
 - Phase 3 — Video Analysis: complete
 - Phase 4 — Script Generation: complete
 - Phase 5 — Voice Generation: complete
-- Phase 6 — B-roll Retrieval: planned
+- Phase 6 — B-roll Retrieval: complete
 - Phase 7 — Video Rendering: planned
 - Phase 8 — Publishing: planned
