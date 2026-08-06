@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from app.models.broll import BrollCollection
     from app.models.video import Video
     from app.models.video_analysis import VideoAnalysis
+    from app.models.video_render import VideoRender
     from app.models.voice_track import VoiceTrack
 
 
@@ -128,4 +129,7 @@ class Script(Base):
     )
     broll_collections: Mapped[list[BrollCollection]] = relationship(
         back_populates="script", cascade="all, delete-orphan"
+    )
+    video_renders: Mapped[list[VideoRender]] = relationship(
+        back_populates="script", cascade="all, delete-orphan", passive_deletes=True
     )

@@ -29,6 +29,14 @@ from app.schemas.video_analysis import (
     VideoAnalysisResult,
     VideoAnalysisStatusResponse,
 )
+from app.schemas.video_render import (
+    RenderOptions,
+    RenderTimelineItem,
+    SubtitleStyle,
+    VideoRenderRequest,
+    VideoRenderResponse,
+    VideoRenderStatusResponse,
+)
 from app.schemas.voice_track import (
     TTSInput,
     TTSResult,
@@ -72,4 +80,10 @@ __all__ = [
     "VoiceSegment",
     "VoiceTrackResponse",
     "VoiceTrackStatusResponse",
+    "RenderOptions",
+    "RenderTimelineItem",
+    "SubtitleStyle",
+    "VideoRenderRequest",
+    "VideoRenderResponse",
+    "VideoRenderStatusResponse",
 ]

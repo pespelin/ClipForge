@@ -23,6 +23,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.script import Script
+    from app.models.video_render import VideoRender
 
 
 class BrollCollectionStatus(StrEnum):
@@ -120,6 +121,9 @@ class BrollCollection(Base):
     script: Mapped[Script] = relationship(back_populates="broll_collections")
     assets: Mapped[list[BrollAsset]] = relationship(
         back_populates="collection", cascade="all, delete-orphan"
+    )
+    video_renders: Mapped[list[VideoRender]] = relationship(
+        back_populates="broll_collection", passive_deletes=True
     )
 
 

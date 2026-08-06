@@ -23,6 +23,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.script import Script
+    from app.models.video_render import VideoRender
 
 
 class VoiceTrackStatus(StrEnum):
@@ -167,3 +168,6 @@ class VoiceTrack(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     script: Mapped[Script] = relationship(back_populates="voice_tracks")
+    video_renders: Mapped[list[VideoRender]] = relationship(
+        back_populates="voice_track", passive_deletes=True
+    )
