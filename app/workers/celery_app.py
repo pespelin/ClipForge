@@ -8,6 +8,7 @@ celery_app = Celery(
     broker=settings.resolved_celery_broker_url,
     backend=settings.resolved_celery_result_backend,
     include=[
+        "app.tasks.broll_retrieval",
         "app.tasks.video",
         "app.tasks.video_analysis",
         "app.tasks.script_generation",
