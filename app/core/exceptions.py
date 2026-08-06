@@ -119,6 +119,11 @@ class BrollRetrievalError(AppError):
     detail = "B-roll retrieval failed"
 
 
+class BrollEnqueueError(AppError):
+    status_code = 503
+    detail = "B-roll retrieval could not be queued"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

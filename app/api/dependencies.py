@@ -6,12 +6,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.providers.analysis import LocalVideoAnalyzer
+from app.providers.media import LocalMediaProvider
 from app.providers.script import LocalScriptGenerator
 from app.providers.tts import LocalTTSProvider
+from app.repositories.broll_repository import BrollAssetRepository, BrollCollectionRepository
 from app.repositories.script_repository import ScriptRepository
 from app.repositories.video_analysis_repository import VideoAnalysisRepository
 from app.repositories.video_repository import VideoRepository
 from app.repositories.voice_track_repository import VoiceTrackRepository
+from app.services.broll_retrieval_service import BrollRetrievalService
 from app.services.ffmpeg_service import FFmpegService
 from app.services.script_generation_service import ScriptGenerationService
 from app.services.storage_service import StorageService
@@ -75,4 +78,18 @@ def get_voice_generation_service(session: DatabaseSession) -> VoiceGenerationSer
 
 VoiceGenerationServiceDependency = Annotated[
     VoiceGenerationService, Depends(get_voice_generation_service)
+]
+
+
+def get_broll_retrieval_service(session: DatabaseSession) -> BrollRetrievalService:
+    return BrollRetrievalService(
+        script_repository=ScriptRepository(session),
+        collection_repository=BrollCollectionRepository(session),
+        asset_repository=BrollAssetRepository(session),
+        media_provider=LocalMediaProvider(),
+    )
+
+
+BrollRetrievalServiceDependency = Annotated[
+    BrollRetrievalService, Depends(get_broll_retrieval_service)
 ]

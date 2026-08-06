@@ -88,6 +88,42 @@ class BrollRetrievalService:
             )
         )
 
+    async def request_broll_retrieval(
+        self,
+        script_id: int,
+        options: BrollRetrievalOptions,
+        *,
+        query_strategy: str = "section_keywords",
+    ) -> BrollCollection:
+        collection = await self.create_collection(script_id, options, query_strategy=query_strategy)
+        await self.collection_repository.commit()
+        return collection
+
+    async def prepare_collection_retry(self, collection_id: int) -> tuple[BrollCollection, bool]:
+        collection = await self.get_collection(collection_id)
+        if collection.status in {
+            BrollCollectionStatus.COMPLETED,
+            BrollCollectionStatus.SEARCHING,
+        }:
+            return collection, False
+
+        collection.status = BrollCollectionStatus.PENDING
+        collection.completed_at = None
+        collection.error_message = None
+        await self.collection_repository.save(collection)
+        await self.collection_repository.commit()
+        return collection, True
+
+    async def mark_broll_enqueue_failed(
+        self, collection: BrollCollection, error: Exception
+    ) -> None:
+        collection.status = BrollCollectionStatus.FAILED
+        collection.completed_at = None
+        message = str(error).strip() or type(error).__name__
+        collection.error_message = f"B-roll retrieval task enqueue failed: {message}"
+        await self.collection_repository.save(collection)
+        await self.collection_repository.commit()
+
     async def process_collection(
         self, collection_id: int
     ) -> tuple[BrollCollection, list[BrollAsset]]:
@@ -162,11 +198,27 @@ class BrollRetrievalService:
         await self.get_collection(collection_id)
         return await self.asset_repository.get_by_collection_id(collection_id)
 
+    async def get_asset(self, asset_id: int) -> BrollAsset:
+        asset = await self.asset_repository.get(asset_id)
+        if asset is None:
+            raise BrollAssetNotFoundError
+        return asset
+
     async def select_asset(self, asset_id: int) -> BrollAsset:
         return await self._set_asset_status(asset_id, BrollAssetStatus.SELECTED)
 
     async def reject_asset(self, asset_id: int) -> BrollAsset:
         return await self._set_asset_status(asset_id, BrollAssetStatus.REJECTED)
+
+    async def select_asset_and_commit(self, asset_id: int) -> BrollAsset:
+        asset = await self.select_asset(asset_id)
+        await self.asset_repository.commit()
+        return asset
+
+    async def reject_asset_and_commit(self, asset_id: int) -> BrollAsset:
+        asset = await self.reject_asset(asset_id)
+        await self.asset_repository.commit()
+        return asset
 
     async def _set_asset_status(self, asset_id: int, status: BrollAssetStatus) -> BrollAsset:
         asset = await self.asset_repository.get(asset_id)

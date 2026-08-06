@@ -43,6 +43,7 @@ class FakeCollectionRepository:
     def __init__(self) -> None:
         self.rows: list[BrollCollection] = []
         self.saved_statuses: list[BrollCollectionStatus] = []
+        self.commits = 0
 
     async def create(self, collection: BrollCollection) -> BrollCollection:
         collection.id = len(self.rows) + 1
@@ -59,11 +60,15 @@ class FakeCollectionRepository:
         self.saved_statuses.append(collection.status)
         return collection
 
+    async def commit(self) -> None:
+        self.commits += 1
+
 
 class FakeAssetRepository:
     def __init__(self) -> None:
         self.rows: list[BrollAsset] = []
         self.saved_statuses: list[BrollAssetStatus] = []
+        self.commits = 0
 
     async def create(self, asset: BrollAsset) -> BrollAsset:
         asset.id = len(self.rows) + 1
@@ -79,6 +84,9 @@ class FakeAssetRepository:
     async def save(self, asset: BrollAsset) -> BrollAsset:
         self.saved_statuses.append(asset.status)
         return asset
+
+    async def commit(self) -> None:
+        self.commits += 1
 
 
 class FakeMediaProvider:
@@ -455,3 +463,36 @@ async def test_select_and_reject_asset_are_persisted_without_download() -> None:
     assert assets.saved_statuses == [BrollAssetStatus.SELECTED, BrollAssetStatus.REJECTED]
     with pytest.raises(BrollAssetNotFoundError):
         await service.select_asset(999)
+
+
+async def test_api_transaction_methods_commit_and_reuse_existing_rows() -> None:
+    service, collections, assets = make_service(script=completed_script())
+    collection = await service.request_broll_retrieval(4, retrieval_options())
+
+    assert collections.commits == 1
+    collection.status = BrollCollectionStatus.FAILED
+    collection.error_message = "old failure"
+    retried, should_enqueue = await service.prepare_collection_retry(collection.id)
+    assert retried is collection
+    assert should_enqueue is True
+    assert collection.status == BrollCollectionStatus.PENDING
+    assert collection.error_message is None
+    assert collections.commits == 2
+
+    await service.mark_broll_enqueue_failed(collection, RuntimeError("broker unavailable"))
+    assert collection.status == BrollCollectionStatus.FAILED
+    assert collection.error_message == "B-roll retrieval task enqueue failed: broker unavailable"
+    assert collections.commits == 3
+
+    candidate = await assets.create(
+        BrollAsset(
+            collection_id=collection.id,
+            provider=BrollProvider.LOCAL,
+            media_type=BrollMediaType.VIDEO,
+            query="editing",
+        )
+    )
+    assert await service.get_asset(candidate.id) is candidate
+    await service.select_asset_and_commit(candidate.id)
+    await service.reject_asset_and_commit(candidate.id)
+    assert assets.commits == 2
