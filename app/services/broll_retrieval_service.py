@@ -225,6 +225,7 @@ class BrollRetrievalService:
                 MediaSearchInput(
                     collection_id=collection.id,
                     script_id=script.id,
+                    provider=options.provider,
                     section_order=source_order,
                     section_type=section.type,
                     section_text=section.text,

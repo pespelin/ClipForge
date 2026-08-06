@@ -66,6 +66,7 @@ class BrollAssetCandidate(BaseModel):
 class MediaSearchInput(BaseModel):
     collection_id: int = Field(gt=0)
     script_id: int = Field(gt=0)
+    provider: BrollProvider = BrollProvider.LOCAL
     section_order: int | None = Field(default=None, ge=0)
     section_type: NonEmptyIdentifier
     section_text: NonEmptyText
