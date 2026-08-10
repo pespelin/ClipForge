@@ -124,6 +124,45 @@ class BrollEnqueueError(AppError):
     detail = "B-roll retrieval could not be queued"
 
 
+class RenderScriptNotReadyError(AppError):
+    status_code = 409
+    detail = "Completed script is required for video rendering"
+
+
+class RenderVoiceTrackNotReadyError(AppError):
+    status_code = 409
+    detail = "Completed voice track is required for video rendering"
+
+
+class RenderVoiceTrackMismatchError(AppError):
+    status_code = 422
+    detail = "Voice track does not belong to the render script"
+
+
+class RenderBrollCollectionMismatchError(AppError):
+    status_code = 422
+    detail = "B-roll collection does not belong to the render script"
+
+
+class RenderBrollCollectionNotReadyError(AppError):
+    status_code = 409
+    detail = "Completed B-roll collection is required for video rendering"
+
+
+class VideoRenderNotFoundError(ResourceNotFoundError):
+    detail = "Video render not found"
+
+
+class UnusableVideoRenderInputError(AppError):
+    status_code = 422
+    detail = "Video render input is not usable"
+
+
+class VideoRenderingError(AppError):
+    status_code = 422
+    detail = "Video rendering failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

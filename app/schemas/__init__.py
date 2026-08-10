@@ -32,9 +32,12 @@ from app.schemas.video_analysis import (
 from app.schemas.video_render import (
     RenderOptions,
     RenderTimelineItem,
+    SelectedBrollAssetInput,
     SubtitleStyle,
+    VideoRenderInput,
     VideoRenderRequest,
     VideoRenderResponse,
+    VideoRenderResult,
     VideoRenderStatusResponse,
 )
 from app.schemas.voice_track import (
@@ -82,8 +85,11 @@ __all__ = [
     "VoiceTrackStatusResponse",
     "RenderOptions",
     "RenderTimelineItem",
+    "SelectedBrollAssetInput",
     "SubtitleStyle",
     "VideoRenderRequest",
+    "VideoRenderInput",
+    "VideoRenderResult",
     "VideoRenderResponse",
     "VideoRenderStatusResponse",
 ]

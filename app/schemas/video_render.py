@@ -3,6 +3,7 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from app.models.broll import BrollMediaType, BrollProvider
 from app.models.video_render import (
     RenderAudioCodec,
     RenderFitMode,
@@ -101,6 +102,53 @@ class VideoRenderRequest(BaseModel):
     voice_track_id: int = Field(gt=0)
     broll_collection_id: int | None = Field(default=None, gt=0)
     options: RenderOptions = Field(default_factory=RenderOptions)
+
+
+class SelectedBrollAssetInput(BaseModel):
+    asset_id: int = Field(gt=0)
+    script_section_order: int | None = Field(default=None, ge=0)
+    provider: BrollProvider
+    external_id: NonEmptyText | None = None
+    media_type: BrollMediaType
+    storage_key: StorageKey | None = None
+    source_url: str | None = None
+    download_url: str | None = None
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    duration_seconds: float | None = Field(default=None, ge=0)
+    metadata_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class VideoRenderInput(BaseModel):
+    render_id: int = Field(gt=0)
+    script_id: int = Field(gt=0)
+    voice_track_id: int = Field(gt=0)
+    broll_collection_id: int | None = Field(default=None, gt=0)
+    render_options: RenderOptions
+    script_full_text: NonEmptyText
+    script_sections: list[dict[str, Any]]
+    voice_storage_key: StorageKey
+    voice_duration_seconds: float = Field(gt=0)
+    voice_segments: list[dict[str, Any]]
+    selected_broll_assets: list[SelectedBrollAssetInput]
+    timeline: list[RenderTimelineItem] = Field(min_length=1)
+    output_storage_key: StorageKey
+
+
+class VideoRenderResult(BaseModel):
+    storage_key: StorageKey
+    duration_seconds: float = Field(gt=0)
+    file_size_bytes: int = Field(ge=0)
+    checksum: Checksum | None = None
+    timeline: list[RenderTimelineItem] = Field(min_length=1)
+    metadata_data: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_timeline_order(self) -> Self:
+        orders = [item.order for item in self.timeline]
+        if orders != sorted(orders) or len(orders) != len(set(orders)):
+            raise ValueError("timeline must have unique items ordered by order")
+        return self
 
 
 class VideoRenderStatusResponse(BaseModel):
