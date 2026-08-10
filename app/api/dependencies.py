@@ -7,11 +7,13 @@ from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.providers.analysis import LocalVideoAnalyzer
 from app.providers.media import LocalMediaProvider
+from app.providers.render import FFmpegVideoRenderer
 from app.providers.script import LocalScriptGenerator
 from app.providers.tts import LocalTTSProvider
 from app.repositories.broll_repository import BrollAssetRepository, BrollCollectionRepository
 from app.repositories.script_repository import ScriptRepository
 from app.repositories.video_analysis_repository import VideoAnalysisRepository
+from app.repositories.video_render_repository import VideoRenderRepository
 from app.repositories.video_repository import VideoRepository
 from app.repositories.voice_track_repository import VoiceTrackRepository
 from app.services.broll_retrieval_service import BrollRetrievalService
@@ -19,6 +21,7 @@ from app.services.ffmpeg_service import FFmpegService
 from app.services.script_generation_service import ScriptGenerationService
 from app.services.storage_service import StorageService
 from app.services.video_analysis_service import VideoAnalysisService
+from app.services.video_render_service import VideoRenderService
 from app.services.video_service import VideoService
 from app.services.voice_generation_service import VoiceGenerationService
 from app.services.whisper_service import WhisperService
@@ -93,3 +96,17 @@ def get_broll_retrieval_service(session: DatabaseSession) -> BrollRetrievalServi
 BrollRetrievalServiceDependency = Annotated[
     BrollRetrievalService, Depends(get_broll_retrieval_service)
 ]
+
+
+def get_video_render_service(session: DatabaseSession) -> VideoRenderService:
+    return VideoRenderService(
+        script_repository=ScriptRepository(session),
+        voice_track_repository=VoiceTrackRepository(session),
+        collection_repository=BrollCollectionRepository(session),
+        asset_repository=BrollAssetRepository(session),
+        render_repository=VideoRenderRepository(session),
+        renderer=FFmpegVideoRenderer(get_settings().storage_root),
+    )
+
+
+VideoRenderServiceDependency = Annotated[VideoRenderService, Depends(get_video_render_service)]

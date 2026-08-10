@@ -163,6 +163,11 @@ class VideoRenderingError(AppError):
     detail = "Video rendering failed"
 
 
+class VideoRenderEnqueueError(AppError):
+    status_code = 503
+    detail = "Video rendering could not be queued"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

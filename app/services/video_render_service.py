@@ -101,6 +101,42 @@ class VideoRenderService:
             )
         )
 
+    async def request_video_render(
+        self,
+        script_id: int,
+        voice_track_id: int,
+        broll_collection_id: int | None,
+        options: RenderOptions,
+    ) -> VideoRender:
+        video_render = await self.create_render(
+            script_id, voice_track_id, broll_collection_id, options
+        )
+        await self.render_repository.commit()
+        return video_render
+
+    async def prepare_render_retry(self, render_id: int) -> tuple[VideoRender, bool]:
+        video_render = await self.get_render(render_id)
+        if video_render.status in {
+            VideoRenderStatus.COMPLETED,
+            VideoRenderStatus.RENDERING,
+        }:
+            return video_render, False
+
+        video_render.status = VideoRenderStatus.PENDING
+        video_render.completed_at = None
+        video_render.error_message = None
+        await self.render_repository.save(video_render)
+        await self.render_repository.commit()
+        return video_render, True
+
+    async def mark_render_enqueue_failed(self, video_render: VideoRender, error: Exception) -> None:
+        video_render.status = VideoRenderStatus.FAILED
+        video_render.completed_at = None
+        message = str(error).strip() or type(error).__name__
+        video_render.error_message = f"Video render task enqueue failed: {message}"
+        await self.render_repository.save(video_render)
+        await self.render_repository.commit()
+
     async def process_render(self, render_id: int) -> VideoRender:
         video_render = await self.get_render(render_id)
         if video_render.status == VideoRenderStatus.COMPLETED:

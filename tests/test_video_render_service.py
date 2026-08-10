@@ -37,6 +37,7 @@ class FakeRepository:
         self.rows = {row.id: row for row in rows or []}
         self.created = []
         self.saved_statuses = []
+        self.commits = 0
 
     async def create(self, row):
         row.id = max(self.rows, default=0) + 1
@@ -54,6 +55,9 @@ class FakeRepository:
         self.rows[row.id] = row
         self.saved_statuses.append(row.status)
         return row
+
+    async def commit(self):
+        self.commits += 1
 
 
 class FakeAssetRepository(FakeRepository):
@@ -430,3 +434,57 @@ async def test_get_and_list_render_behavior() -> None:
     assert await service.list_renders_for_script(4) == [existing]
     with pytest.raises(VideoRenderNotFoundError):
         await service.get_render(999)
+
+
+async def test_request_render_commits_pending_row() -> None:
+    service, renders, _ = make_service(script=completed_script(), voice=completed_voice())
+
+    video_render = await service.request_video_render(4, 8, None, RenderOptions())
+
+    assert video_render.status == VideoRenderStatus.PENDING
+    assert renders.commits == 1
+
+
+@pytest.mark.parametrize("state", [VideoRenderStatus.PENDING, VideoRenderStatus.FAILED])
+async def test_prepare_retry_reuses_row_clears_failure_and_commits(state) -> None:
+    existing = VideoRender(
+        id=2,
+        script_id=4,
+        voice_track_id=8,
+        status=state,
+        completed_at=None,
+        error_message="Old failure",
+    )
+    service, renders, _ = make_service(renders=[existing])
+
+    video_render, should_enqueue = await service.prepare_render_retry(2)
+
+    assert video_render is existing
+    assert should_enqueue is True
+    assert video_render.status == VideoRenderStatus.PENDING
+    assert video_render.error_message is None
+    assert renders.commits == 1
+
+
+@pytest.mark.parametrize("state", [VideoRenderStatus.RENDERING, VideoRenderStatus.COMPLETED])
+async def test_prepare_retry_does_not_commit_active_or_completed_render(state) -> None:
+    existing = VideoRender(id=2, script_id=4, voice_track_id=8, status=state)
+    service, renders, _ = make_service(renders=[existing])
+
+    video_render, should_enqueue = await service.prepare_render_retry(2)
+
+    assert video_render is existing
+    assert should_enqueue is False
+    assert renders.commits == 0
+
+
+async def test_mark_enqueue_failed_persists_and_commits() -> None:
+    existing = VideoRender(id=2, script_id=4, voice_track_id=8)
+    service, renders, _ = make_service(renders=[existing])
+
+    await service.mark_render_enqueue_failed(existing, RuntimeError("broker unavailable"))
+
+    assert existing.status == VideoRenderStatus.FAILED
+    assert existing.completed_at is None
+    assert existing.error_message == "Video render task enqueue failed: broker unavailable"
+    assert renders.commits == 1
