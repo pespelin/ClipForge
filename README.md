@@ -1,9 +1,9 @@
 # YouTube Shorts Automation Platform
 
-Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–6 implement
+Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–7 implement
 backend infrastructure, video ingestion and transcription, structured video analysis, and
-deterministic offline Shorts script, voice generation, and B-roll retrieval. Later
-content-production phases are not yet implemented.
+deterministic offline Shorts script, voice generation, B-roll retrieval, and local video
+rendering. Later publishing phases are not yet implemented.
 
 ## Architecture
 
@@ -33,6 +33,8 @@ produce human-like or intelligible speech.
 The current `LocalMediaProvider` produces deterministic synthetic B-roll metadata with deliberately
 non-resolving `local.invalid` URLs. It supports offline workflow development but does not search,
 license, download, or store real media.
+Video rendering uses `FFmpegVideoRenderer`, a local adapter that consumes provider-neutral render
+contracts and produces validated MP4/H.264/AAC artifacts without accessing application persistence.
 
 ## Local setup
 
@@ -73,6 +75,7 @@ storage/videos/{video_id}/original.{mp4|mov|mkv|webm}
 storage/videos/{video_id}/audio.wav
 storage/videos/{video_id}/transcript.json
 storage/videos/voice/{voice_track_id}/audio.wav
+storage/videos/renders/{render_id}/output.mp4
 ```
 
 Both API and worker containers mount the application directory, so they share this storage during
@@ -302,6 +305,105 @@ curl --fail http://localhost:8000/api/v1/health
 Host PostgreSQL remains available at `localhost:5433`; API and worker containers connect to
 PostgreSQL at `postgres:5432`.
 
+## Video rendering (Phase 7)
+
+A completed `Script` may own multiple `VideoRender` variants. Every render references exactly one
+completed `VoiceTrack` belonging to that script and may reference one completed
+`BrollCollection`. Voice tracks and B-roll collections can be reused by multiple renders. Each
+render stores immutable option, subtitle-style, and completed timeline snapshots without placing
+ORM objects or absolute filesystem paths in JSON.
+
+The API creates and commits a pending render before publishing the separate `video.render` Celery
+task. The worker opens the existing async database session and composes `ScriptRepository`,
+`VoiceTrackRepository`, `BrollCollectionRepository`, `BrollAssetRepository`,
+`VideoRenderRepository`, `VideoRenderService`, and `FFmpegVideoRenderer`. The service validates
+input readiness, builds the deterministic timeline, and maps validated renderer metadata back to
+the existing row. The renderer owns FFmpeg command execution and artifact validation.
+
+The render lifecycle is:
+
+```text
+pending → rendering → completed
+          ↖         ↘ failed
+          └─ retry ──┘
+```
+
+Narration spans the completed voice-track duration. Subtitle items follow voice segment timing
+when subtitles are enabled; overlaps among narration, subtitles, and visual layers are allowed.
+When no usable local B-roll exists, FFmpeg renders a deterministic solid-color background at the
+requested dimensions and FPS. Selected metadata-only Phase 6 assets have no storage key and are
+therefore skipped without attempting their `local.invalid` URLs. The current compositor supports
+at most the first usable local B-roll image or video layer; it does not download or combine a full
+multi-asset visual sequence.
+
+`FFmpegVideoRenderer` currently supports MP4 with H.264 video and AAC audio. The existing WAV voice
+artifact is the primary audio stream. Optional single-pass loudness normalization targets the
+requested LUFS value. Narration shorter than one second uses a deterministic resample-and-pad
+fallback because FFmpeg `loudnorm` can emit non-finite samples for very short or silent inputs.
+Disabling normalization passes narration through the filter graph unchanged before AAC encoding.
+
+After rendering, `ffprobe` must report a positive duration and both video and audio streams. The
+adapter also verifies a non-empty file and persists its measured duration, byte size, and SHA-256
+checksum. Artifacts use relative keys beneath the shared `STORAGE_ROOT`:
+
+```text
+renders/{render_id}/output.mp4
+```
+
+API and worker containers use the same storage root and project bind mount. HTTP responses expose
+only the relative key, never an absolute host/container path.
+
+### Render API
+
+- `POST /api/v1/scripts/{script_id}/renders` creates a new pending render variant, commits it,
+  queues `video.render`, and returns `202 Accepted`.
+- `GET /api/v1/scripts/{script_id}/renders` lists variants newest first, returning compact status
+  objects for pending, rendering, and failed rows and complete artifact results for completed rows.
+- `GET /api/v1/renders/{render_id}` returns the current status or completed render result.
+- `POST /api/v1/renders/{render_id}/retry` reuses a pending or failed row and returns `202
+  Accepted`. Rendering and completed rows return `200 OK` without duplicate publication.
+
+Every explicit create request produces a distinct variant, even for identical options. Completed
+task reruns and completed retries are idempotent: they do not invoke FFmpeg again, change existing
+bytes/checksums, or create another row. Pending and failed retries preserve the render options and
+timeline snapshots; processing rebuilds and validates the timeline before invoking the renderer.
+
+### Rendering limitations and verification
+
+- Rendering is local development infrastructure, not a production multi-layer compositor.
+- MOV, WEBM, HEVC, VP9, Opus, and PCM are represented by contracts but are not currently accepted
+  by the local adapter; unsupported combinations fail explicitly.
+- Phase 6 does not download media. Only selected/downloaded B-roll with an actual readable local
+  storage key can enter visual composition.
+- Filesystem writes and database transactions are not atomic. A failed FFmpeg execution or later
+  validation failure is never committed as completed, but a partial output artifact may remain for
+  later cleanup.
+- Database commit and Celery publication are also not atomic. Synchronous broker failures are
+  persisted on the same render, while a crash after commit and before publish may leave pending
+  work unqueued. A transactional outbox is not implemented.
+
+Apply the complete migration chain and run local verification with:
+
+```bash
+docker compose exec api uv run --no-sync alembic upgrade head
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+docker compose config
+```
+
+The Docker image contains FFmpeg and ffprobe. Run the real renderer and worker-boundary checks with:
+
+```bash
+docker compose exec api uv run pytest tests/test_phase7_workflow.py -q
+docker compose exec api uv run pytest tests/test_video_rendering_task.py -q
+docker compose exec api uv run pytest tests/test_ffmpeg_video_renderer.py -q
+docker compose ps
+curl --fail http://localhost:8000/api/v1/health
+```
+
+Host PostgreSQL remains at `localhost:5433`; API and worker containers use `postgres:5432`.
+
 ## Development commands
 
 ```bash
@@ -337,5 +439,5 @@ model as the application. Models must be imported through `app.models` for autog
 - Phase 4 — Script Generation: complete
 - Phase 5 — Voice Generation: complete
 - Phase 6 — B-roll Retrieval: complete
-- Phase 7 — Video Rendering: planned
+- Phase 7 — Video Rendering: complete
 - Phase 8 — Publishing: planned
