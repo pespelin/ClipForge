@@ -7,7 +7,7 @@ from app.core.config import get_settings
 from app.db.session import get_db_session
 from app.providers.analysis import LocalVideoAnalyzer
 from app.providers.media import LocalMediaProvider
-from app.providers.publishing import LocalPublishingProvider
+from app.providers.publishing import create_publishing_provider
 from app.providers.render import FFmpegVideoRenderer
 from app.providers.script import LocalScriptGenerator
 from app.providers.tts import LocalTTSProvider
@@ -119,7 +119,7 @@ def get_publishing_service(session: DatabaseSession) -> PublishingService:
     return PublishingService(
         video_render_repository=VideoRenderRepository(session),
         publish_job_repository=PublishJobRepository(session),
-        publishing_provider=LocalPublishingProvider(),
+        publishing_provider=create_publishing_provider(),
     )
 
 

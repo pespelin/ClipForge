@@ -41,7 +41,7 @@ def patch_dependencies(monkeypatch, session: FakeSession, service_type: type) ->
     monkeypatch.setattr(task_module, "AsyncSessionLocal", lambda: session)
     monkeypatch.setattr(task_module, "VideoRenderRepository", lambda received: object())
     monkeypatch.setattr(task_module, "PublishJobRepository", lambda received: object())
-    monkeypatch.setattr(task_module, "LocalPublishingProvider", object)
+    monkeypatch.setattr(task_module, "create_publishing_provider", object)
     monkeypatch.setattr(task_module, "PublishingService", service_type)
 
 
@@ -69,7 +69,8 @@ async def test_task_composes_dependencies_and_returns_result(monkeypatch) -> Non
     monkeypatch.setattr(
         task_module, "PublishJobRepository", lambda received: publish_job_repository
     )
-    monkeypatch.setattr(task_module, "LocalPublishingProvider", lambda: provider)
+    factory = Mock(return_value=provider)
+    monkeypatch.setattr(task_module, "create_publishing_provider", factory)
     monkeypatch.setattr(task_module, "PublishingService", FakeService)
 
     result = await task_module._run_publishing(7)
@@ -82,6 +83,7 @@ async def test_task_composes_dependencies_and_returns_result(monkeypatch) -> Non
     assert dependencies["video_render_repository"] is render_repository
     assert dependencies["publish_job_repository"] is publish_job_repository
     assert dependencies["publishing_provider"] is provider
+    factory.assert_called_once_with()
     assert dependencies["publish_job_id"] == 7
     assert session.commits == 1
     assert session.rollbacks == 0
@@ -218,7 +220,7 @@ def patch_real_service(
         task_module, "VideoRenderRepository", lambda received: UnexpectedRenderRepository()
     )
     monkeypatch.setattr(task_module, "PublishJobRepository", lambda received: repository)
-    monkeypatch.setattr(task_module, "LocalPublishingProvider", lambda: provider)
+    monkeypatch.setattr(task_module, "create_publishing_provider", lambda: provider)
     monkeypatch.setattr(task_module, "PublishingService", PublishingService)
 
 

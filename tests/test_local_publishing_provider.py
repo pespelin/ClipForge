@@ -2,6 +2,7 @@ import inspect
 import json
 import socket
 from datetime import UTC, datetime, timedelta, timezone
+from typing import get_type_hints
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.providers.publishing import (
     PublishingProvider,
     UnsupportedPublishingPlatformError,
     UnusablePublishingInputError,
+    create_publishing_provider,
 )
 from app.schemas.publish_job import PublishingInput, PublishingResult
 
@@ -54,6 +56,13 @@ def test_protocol_compatibility_and_async_boundary() -> None:
 
     assert isinstance(provider, LocalPublishingProvider)
     assert inspect.iscoroutinefunction(provider.publish)
+
+
+def test_shared_factory_returns_local_provider_through_abstraction() -> None:
+    provider = create_publishing_provider()
+
+    assert isinstance(provider, LocalPublishingProvider)
+    assert get_type_hints(create_publishing_provider)["return"] is PublishingProvider
 
 
 async def test_identical_input_produces_identical_complete_result() -> None:

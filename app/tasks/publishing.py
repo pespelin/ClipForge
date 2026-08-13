@@ -4,7 +4,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.core.exceptions import PublishingError
 from app.db.session import AsyncSessionLocal
-from app.providers.publishing import LocalPublishingProvider
+from app.providers.publishing import create_publishing_provider
 from app.repositories.publish_job_repository import PublishJobRepository
 from app.repositories.video_render_repository import VideoRenderRepository
 from app.services.publishing_service import PublishingService
@@ -16,7 +16,7 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
         service = PublishingService(
             video_render_repository=VideoRenderRepository(session),
             publish_job_repository=PublishJobRepository(session),
-            publishing_provider=LocalPublishingProvider(),
+            publishing_provider=create_publishing_provider(),
         )
         try:
             publish_job = await service.process_publish_job(publish_job_id)

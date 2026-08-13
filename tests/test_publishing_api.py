@@ -1,6 +1,7 @@
 import inspect
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
@@ -409,7 +410,7 @@ def test_cancel_active_or_published_returns_409(state) -> None:
     assert response.status_code == 409
 
 
-def test_dependency_composes_repositories_and_local_provider(monkeypatch) -> None:
+def test_dependency_composes_repositories_and_shared_provider(monkeypatch) -> None:
     session = object()
     render_repository = object()
     job_repository = object()
@@ -418,13 +419,15 @@ def test_dependency_composes_repositories_and_local_provider(monkeypatch) -> Non
         dependency_module, "VideoRenderRepository", lambda received: render_repository
     )
     monkeypatch.setattr(dependency_module, "PublishJobRepository", lambda received: job_repository)
-    monkeypatch.setattr(dependency_module, "LocalPublishingProvider", lambda: provider)
+    factory = Mock(return_value=provider)
+    monkeypatch.setattr(dependency_module, "create_publishing_provider", factory)
 
     service = dependency_module.get_publishing_service(session)
 
     assert service.video_render_repository is render_repository
     assert service.publish_job_repository is job_repository
     assert service.publishing_provider is provider
+    factory.assert_called_once_with()
 
 
 def test_routes_contain_no_repository_or_provider_construction() -> None:

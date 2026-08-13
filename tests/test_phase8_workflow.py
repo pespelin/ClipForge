@@ -164,7 +164,7 @@ class Phase8Harness:
         monkeypatch.setattr(publishing_task, "AsyncSessionLocal", lambda: self.session)
         monkeypatch.setattr(publishing_task, "VideoRenderRepository", InMemoryVideoRenderRepository)
         monkeypatch.setattr(publishing_task, "PublishJobRepository", InMemoryPublishJobRepository)
-        monkeypatch.setattr(publishing_task, "LocalPublishingProvider", lambda: self.provider)
+        monkeypatch.setattr(publishing_task, "create_publishing_provider", lambda: self.provider)
 
     def _service(self, provider) -> PublishingService:
         return PublishingService(self.render_repository, self.job_repository, provider)
