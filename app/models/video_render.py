@@ -24,6 +24,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.broll import BrollCollection
+    from app.models.publish_job import PublishJob
     from app.models.script import Script
     from app.models.voice_track import VoiceTrack
 
@@ -240,3 +241,6 @@ class VideoRender(Base):
     script: Mapped[Script] = relationship(back_populates="video_renders")
     voice_track: Mapped[VoiceTrack] = relationship(back_populates="video_renders")
     broll_collection: Mapped[BrollCollection | None] = relationship(back_populates="video_renders")
+    publish_jobs: Mapped[list[PublishJob]] = relationship(
+        back_populates="video_render", passive_deletes="all"
+    )
