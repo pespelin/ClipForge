@@ -1,9 +1,9 @@
 # YouTube Shorts Automation Platform
 
-Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–7 implement
+Production-oriented backend for a future AI-powered YouTube Shorts SaaS. Phases 1–8 implement
 backend infrastructure, video ingestion and transcription, structured video analysis, and
 deterministic offline Shorts script, voice generation, B-roll retrieval, and local video
-rendering. Later publishing phases are not yet implemented.
+rendering and publishing simulation.
 
 ## Architecture
 
@@ -35,6 +35,9 @@ non-resolving `local.invalid` URLs. It supports offline workflow development but
 license, download, or store real media.
 Video rendering uses `FFmpegVideoRenderer`, a local adapter that consumes provider-neutral render
 contracts and produces validated MP4/H.264/AAC artifacts without accessing application persistence.
+Publishing uses `LocalPublishingProvider`, a deterministic metadata-only simulator. It creates
+synthetic `local-youtube-*` identities and `publishing.local.invalid` URLs without network access,
+credentials, OAuth, or a real upload.
 
 ## Local setup
 
@@ -404,6 +407,81 @@ curl --fail http://localhost:8000/api/v1/health
 
 Host PostgreSQL remains at `localhost:5433`; API and worker containers use `postgres:5432`.
 
+## Publishing (Phase 8)
+
+A completed `VideoRender` may own multiple `PublishJob` variants or attempts. Each job snapshots
+the exact render artifact key, checksum, byte size, and duration when it is created, so later render
+changes cannot silently alter the bytes that the publication intended to use. Jobs also preserve
+normalized metadata and provider-neutral options. They never store OAuth tokens, refresh tokens,
+API keys, or client secrets. Visibility defaults conservatively to `private`.
+
+The API creates and commits a pending job before publishing the separate `publish.execute` Celery
+task. The worker composes `VideoRenderRepository`, `PublishJobRepository`, `PublishingService`, and
+the injected `PublishingProvider`. `PublishingService` owns render readiness, source snapshots,
+scheduling checks, state transitions, cancellation, provider-result validation, and failure
+persistence. Repository writes remain flush-only until the API or task transaction boundary commits.
+
+The current `LocalPublishingProvider` is a deterministic offline development adapter. It derives
+stable `local-youtube-*` remote IDs from the persisted provider-neutral input, returns synthetic
+`https://publishing.local.invalid/...` URLs, and records `synthetic=true` and
+`real_publication=false` in JSON-safe provider metadata. It never opens the render artifact, makes a
+network request, resolves account credentials, or claims that a real YouTube upload exists.
+
+The publishing lifecycle is:
+
+```text
+pending → publishing → published
+   │          └──────→ failed
+   └───────────────→ cancelled
+failed ────────────→ cancelled
+```
+
+Failed jobs may retry using the same row and immutable source/intent snapshots. Published task
+reruns and retries are idempotent and preserve remote identity, URL, timestamp, and provider
+metadata. Publishing or published jobs cannot be cancelled, while cancelling an already-cancelled
+job is idempotent. Cancellation does not perform remote deletion.
+
+### Publishing API
+
+- `POST /api/v1/renders/{video_render_id}/publish-jobs` creates a distinct pending attempt and
+  returns `202 Accepted`. Due or unscheduled jobs are queued after commit.
+- `GET /api/v1/renders/{video_render_id}/publish-jobs` lists attempts newest first with mixed status
+  and complete published response shapes.
+- `GET /api/v1/publish-jobs/{publish_job_id}` returns current status or the complete remote result.
+- `POST /api/v1/publish-jobs/{publish_job_id}/retry` reuses pending/failed rows. Published and
+  publishing rows return without duplicate dispatch; cancelled rows return a conflict.
+- `POST /api/v1/publish-jobs/{publish_job_id}/cancel` cancels pending/failed jobs without enqueueing
+  work or contacting a provider.
+
+`scheduled_publish_at` records timezone-aware scheduling intent. A future-scheduled create or retry
+is committed as pending but is not dispatched early. ClipForge intentionally has no durable
+production scheduler yet: no polling loop, sleeping worker, or ETA dispatcher was introduced.
+
+### Publishing limitations and verification
+
+- Local publishing is a safe simulation, not YouTube integration. OAuth, uploads, remote status
+  reconciliation, remote deletion, and real provider limits remain unimplemented.
+- Database commits and broker publication are not atomic. A synchronous enqueue error is persisted
+  as failed on the same job, but a crash after commit and before publication can leave pending work
+  undispatched. A transactional outbox is not implemented.
+- Future scheduled jobs require later durable scheduling infrastructure to dispatch automatically.
+
+Apply the complete migration chain and verify Phase 8 with:
+
+```bash
+docker compose exec api uv run --no-sync alembic upgrade head
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+git diff --check
+docker compose config
+docker compose ps
+curl --fail http://localhost:8000/api/v1/health
+```
+
+Host PostgreSQL remains at `localhost:5433`; API and worker containers use PostgreSQL at
+`postgres:5432`.
+
 ## Development commands
 
 ```bash
@@ -440,4 +518,4 @@ model as the application. Models must be imported through `app.models` for autog
 - Phase 5 — Voice Generation: complete
 - Phase 6 — B-roll Retrieval: complete
 - Phase 7 — Video Rendering: complete
-- Phase 8 — Publishing: planned
+- Phase 8 — Publishing: complete
