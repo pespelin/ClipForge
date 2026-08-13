@@ -1,7 +1,8 @@
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import quote_plus
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +36,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, repr=False)
     openai_base_url: str = "https://api.openai.com/v1"
     pexels_api_key: str | None = Field(default=None, repr=False)
+
+    publishing_provider: Literal["local", "youtube"] = "local"
+    youtube_oauth_client_id: str | None = None
+    youtube_oauth_client_secret: SecretStr | None = None
+    youtube_oauth_redirect_uri: str | None = None
 
     @property
     def database_url(self) -> str:
