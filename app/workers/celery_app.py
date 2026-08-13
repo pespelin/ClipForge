@@ -9,6 +9,7 @@ celery_app = Celery(
     backend=settings.resolved_celery_result_backend,
     include=[
         "app.tasks.broll_retrieval",
+        "app.tasks.publishing",
         "app.tasks.video",
         "app.tasks.video_analysis",
         "app.tasks.video_rendering",
