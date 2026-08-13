@@ -72,6 +72,41 @@ class PublishingService:
             )
         )
 
+    async def request_publish_job(
+        self, video_render_id: int, request: PublishRequest
+    ) -> tuple[PublishJob, bool]:
+        publish_job = await self.create_publish_job(video_render_id, request)
+        await self.publish_job_repository.commit()
+        return publish_job, self._is_due(publish_job)
+
+    async def prepare_publish_retry(self, publish_job_id: int) -> tuple[PublishJob, bool]:
+        publish_job = await self.get_publish_job(publish_job_id)
+        if publish_job.status in {PublishStatus.PUBLISHED, PublishStatus.PUBLISHING}:
+            return publish_job, False
+        if publish_job.status == PublishStatus.CANCELLED:
+            raise PublishJobCancelledError
+
+        if publish_job.status == PublishStatus.FAILED:
+            publish_job.status = PublishStatus.PENDING
+            publish_job.completed_at = None
+            publish_job.error_message = None
+            await self.publish_job_repository.save(publish_job)
+        await self.publish_job_repository.commit()
+        return publish_job, self._is_due(publish_job)
+
+    async def mark_publish_enqueue_failed(self, publish_job: PublishJob, error: Exception) -> None:
+        publish_job.status = PublishStatus.FAILED
+        publish_job.completed_at = None
+        message = str(error).strip() or type(error).__name__
+        publish_job.error_message = f"Publishing task enqueue failed: {message}"
+        await self.publish_job_repository.save(publish_job)
+        await self.publish_job_repository.commit()
+
+    async def cancel_publish_job_and_commit(self, publish_job_id: int) -> PublishJob:
+        publish_job = await self.cancel_publish_job(publish_job_id)
+        await self.publish_job_repository.commit()
+        return publish_job
+
     async def process_publish_job(self, publish_job_id: int) -> PublishJob:
         publish_job = await self.get_publish_job(publish_job_id)
         if publish_job.status == PublishStatus.PUBLISHED:
@@ -153,6 +188,14 @@ class PublishingService:
             raise PublishNotDueError
         if scheduled > datetime.now(UTC):
             raise PublishNotDueError
+
+    @staticmethod
+    def _is_due(publish_job: PublishJob) -> bool:
+        try:
+            PublishingService._verify_due(publish_job)
+        except PublishNotDueError:
+            return False
+        return True
 
     @staticmethod
     def _build_publishing_input(publish_job: PublishJob) -> PublishingInput:

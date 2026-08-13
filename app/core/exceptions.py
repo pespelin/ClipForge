@@ -202,6 +202,11 @@ class PublishingError(AppError):
     detail = "Publishing failed"
 
 
+class PublishEnqueueError(AppError):
+    status_code = 503
+    detail = "Publishing could not be queued"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

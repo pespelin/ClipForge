@@ -24,6 +24,7 @@ class FakeRepository:
         self.rows = {row.id: row for row in rows or []}
         self.created = []
         self.saved_statuses = []
+        self.commits = 0
 
     async def create(self, row):
         row.id = max(self.rows, default=0) + 1
@@ -41,6 +42,9 @@ class FakeRepository:
         self.rows[row.id] = row
         self.saved_statuses.append(row.status)
         return row
+
+    async def commit(self):
+        self.commits += 1
 
 
 class RecordingProvider:
@@ -402,3 +406,78 @@ async def test_get_and_list_delegate_to_repositories() -> None:
         await service.get_publish_job(999)
     with pytest.raises(VideoRenderNotFoundError):
         await service.list_publish_jobs_for_render(999)
+
+
+async def test_request_publish_job_commits_and_reports_due_state() -> None:
+    service, jobs, _ = make_service(render=completed_render())
+
+    job, should_enqueue = await service.request_publish_job(4, publish_request())
+
+    assert job.status == PublishStatus.PENDING
+    assert should_enqueue is True
+    assert jobs.commits == 1
+
+
+async def test_request_future_job_commits_without_being_due() -> None:
+    future = datetime.now(UTC) + timedelta(hours=1)
+    service, jobs, _ = make_service(render=completed_render())
+
+    job, should_enqueue = await service.request_publish_job(
+        4, publish_request(scheduled_publish_at=future)
+    )
+
+    assert job.scheduled_publish_at == future
+    assert should_enqueue is False
+    assert jobs.commits == 1
+
+
+async def test_prepare_failed_retry_preserves_intent_and_commits() -> None:
+    future = datetime.now(UTC) + timedelta(hours=1)
+    job = existing_job(
+        PublishStatus.FAILED,
+        error_message="Old failure",
+        scheduled_publish_at=future,
+        publish_options=publish_request(scheduled_publish_at=future).options.model_dump(
+            mode="json"
+        ),
+    )
+    original = (
+        job.source_storage_key,
+        job.source_checksum,
+        job.source_file_size_bytes,
+        job.source_duration_seconds,
+        list(job.tags),
+        dict(job.publish_options),
+    )
+    service, jobs, _ = make_service(jobs=[job])
+
+    result, should_enqueue = await service.prepare_publish_retry(1)
+
+    assert result is job
+    assert result.status == PublishStatus.PENDING
+    assert result.error_message is None
+    assert should_enqueue is False
+    assert jobs.commits == 1
+    assert original == (
+        job.source_storage_key,
+        job.source_checksum,
+        job.source_file_size_bytes,
+        job.source_duration_seconds,
+        job.tags,
+        job.publish_options,
+    )
+
+
+async def test_mark_enqueue_failed_and_cancel_helpers_commit() -> None:
+    first = existing_job()
+    service, jobs, _ = make_service(jobs=[first])
+
+    await service.mark_publish_enqueue_failed(first, RuntimeError("broker unavailable"))
+
+    assert first.status == PublishStatus.FAILED
+    assert first.error_message == "Publishing task enqueue failed: broker unavailable"
+    assert jobs.commits == 1
+
+    await service.cancel_publish_job_and_commit(1)
+    assert first.status == PublishStatus.CANCELLED
+    assert jobs.commits == 2
