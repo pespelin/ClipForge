@@ -168,6 +168,40 @@ class VideoRenderEnqueueError(AppError):
     detail = "Video rendering could not be queued"
 
 
+class RenderNotReadyForPublishingError(AppError):
+    status_code = 409
+    detail = "Completed video render is required for publishing"
+
+
+class UnusablePublishArtifactError(AppError):
+    status_code = 422
+    detail = "Video render artifact is not usable for publishing"
+
+
+class PublishJobNotFoundError(ResourceNotFoundError):
+    detail = "Publish job not found"
+
+
+class PublishJobCancelledError(AppError):
+    status_code = 409
+    detail = "Cancelled publish job cannot be processed"
+
+
+class PublishNotDueError(AppError):
+    status_code = 409
+    detail = "Scheduled publish job is not due"
+
+
+class PublishCancellationConflictError(AppError):
+    status_code = 409
+    detail = "Publish job cannot be cancelled in its current state"
+
+
+class PublishingError(AppError):
+    status_code = 422
+    detail = "Publishing failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

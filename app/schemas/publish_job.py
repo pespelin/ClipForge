@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime
 from typing import Annotated, Any, Self
 
@@ -75,6 +76,59 @@ class PublishMetadata(BaseModel):
 class PublishRequest(BaseModel):
     metadata: PublishMetadata
     options: PublishOptions
+
+
+class PublishingInput(BaseModel):
+    publish_job_id: int = Field(gt=0)
+    video_render_id: int = Field(gt=0)
+    platform: PublishPlatform
+    account_reference: AccountReference
+    source_storage_key: StorageKey
+    source_checksum: Checksum | None = None
+    source_file_size_bytes: int = Field(ge=0)
+    source_duration_seconds: float = Field(gt=0)
+    title: Title
+    description: str | None = Field(default=None, max_length=10_000)
+    tags: list[str] = Field(default_factory=list, max_length=50)
+    category: Category | None = None
+    visibility: PublishVisibility
+    made_for_kids: bool
+    notify_subscribers: bool
+    language: LanguageCode
+    recording_date: date | None = None
+    scheduled_publish_at: datetime | None = None
+    publish_options: PublishOptions
+
+    @field_validator("scheduled_publish_at")
+    @classmethod
+    def require_input_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("scheduled_publish_at must include timezone information")
+        return value
+
+
+class PublishingResult(BaseModel):
+    remote_media_id: RemoteIdentifier
+    remote_url: HttpUrl | None = None
+    remote_status: RemoteStatus | None = None
+    published_at: datetime
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("published_at")
+    @classmethod
+    def require_published_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("published_at must include timezone information")
+        return value
+
+    @field_validator("provider_metadata")
+    @classmethod
+    def require_json_safe_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("provider_metadata must be JSON-safe") from error
+        return value
 
 
 class PublishJobStatusResponse(BaseModel):
