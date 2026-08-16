@@ -76,7 +76,6 @@ class PublishingService:
         self, video_render_id: int, request: PublishRequest
     ) -> tuple[PublishJob, bool]:
         publish_job = await self.create_publish_job(video_render_id, request)
-        await self.publish_job_repository.commit()
         return publish_job, self._is_due(publish_job)
 
     async def prepare_publish_retry(self, publish_job_id: int) -> tuple[PublishJob, bool]:
@@ -91,7 +90,6 @@ class PublishingService:
             publish_job.completed_at = None
             publish_job.error_message = None
             await self.publish_job_repository.save(publish_job)
-        await self.publish_job_repository.commit()
         return publish_job, self._is_due(publish_job)
 
     async def mark_publish_enqueue_failed(self, publish_job: PublishJob, error: Exception) -> None:
@@ -100,12 +98,6 @@ class PublishingService:
         message = str(error).strip() or type(error).__name__
         publish_job.error_message = f"Publishing task enqueue failed: {message}"
         await self.publish_job_repository.save(publish_job)
-        await self.publish_job_repository.commit()
-
-    async def cancel_publish_job_and_commit(self, publish_job_id: int) -> PublishJob:
-        publish_job = await self.cancel_publish_job(publish_job_id)
-        await self.publish_job_repository.commit()
-        return publish_job
 
     async def process_publish_job(self, publish_job_id: int) -> PublishJob:
         publish_job = await self.get_publish_job(publish_job_id)

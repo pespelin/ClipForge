@@ -24,7 +24,6 @@ class FakeRepository:
         self.rows = {row.id: row for row in rows or []}
         self.created = []
         self.saved_statuses = []
-        self.commits = 0
 
     async def create(self, row):
         row.id = max(self.rows, default=0) + 1
@@ -42,9 +41,6 @@ class FakeRepository:
         self.rows[row.id] = row
         self.saved_statuses.append(row.status)
         return row
-
-    async def commit(self):
-        self.commits += 1
 
 
 class RecordingProvider:
@@ -408,17 +404,17 @@ async def test_get_and_list_delegate_to_repositories() -> None:
         await service.list_publish_jobs_for_render(999)
 
 
-async def test_request_publish_job_commits_and_reports_due_state() -> None:
+async def test_request_publish_job_creates_and_reports_due_state_without_transaction() -> None:
     service, jobs, _ = make_service(render=completed_render())
 
     job, should_enqueue = await service.request_publish_job(4, publish_request())
 
     assert job.status == PublishStatus.PENDING
     assert should_enqueue is True
-    assert jobs.commits == 1
+    assert jobs.created == [job]
 
 
-async def test_request_future_job_commits_without_being_due() -> None:
+async def test_request_future_job_creates_without_being_due() -> None:
     future = datetime.now(UTC) + timedelta(hours=1)
     service, jobs, _ = make_service(render=completed_render())
 
@@ -428,10 +424,10 @@ async def test_request_future_job_commits_without_being_due() -> None:
 
     assert job.scheduled_publish_at == future
     assert should_enqueue is False
-    assert jobs.commits == 1
+    assert jobs.created == [job]
 
 
-async def test_prepare_failed_retry_preserves_intent_and_commits() -> None:
+async def test_prepare_failed_retry_preserves_intent_without_transaction() -> None:
     future = datetime.now(UTC) + timedelta(hours=1)
     job = existing_job(
         PublishStatus.FAILED,
@@ -457,7 +453,7 @@ async def test_prepare_failed_retry_preserves_intent_and_commits() -> None:
     assert result.status == PublishStatus.PENDING
     assert result.error_message is None
     assert should_enqueue is False
-    assert jobs.commits == 1
+    assert jobs.saved_statuses == [PublishStatus.PENDING]
     assert original == (
         job.source_storage_key,
         job.source_checksum,
@@ -468,7 +464,7 @@ async def test_prepare_failed_retry_preserves_intent_and_commits() -> None:
     )
 
 
-async def test_mark_enqueue_failed_and_cancel_helpers_commit() -> None:
+async def test_mark_enqueue_failed_and_cancel_mutate_without_transaction() -> None:
     first = existing_job()
     service, jobs, _ = make_service(jobs=[first])
 
@@ -476,8 +472,8 @@ async def test_mark_enqueue_failed_and_cancel_helpers_commit() -> None:
 
     assert first.status == PublishStatus.FAILED
     assert first.error_message == "Publishing task enqueue failed: broker unavailable"
-    assert jobs.commits == 1
+    assert jobs.saved_statuses == [PublishStatus.FAILED]
 
-    await service.cancel_publish_job_and_commit(1)
+    await service.cancel_publish_job(1)
     assert first.status == PublishStatus.CANCELLED
-    assert jobs.commits == 2
+    assert jobs.saved_statuses == [PublishStatus.FAILED, PublishStatus.CANCELLED]

@@ -51,14 +51,11 @@ async def test_list_by_render_is_newest_first(session: AsyncMock, publish_job: P
     assert result == [publish_job]
 
 
-async def test_save_flushes_and_commit_owns_transaction(
-    session: AsyncMock, publish_job: PublishJob
-) -> None:
+async def test_save_flushes_without_committing(session: AsyncMock, publish_job: PublishJob) -> None:
     repository = PublishJobRepository(session)
 
     result = await repository.save(publish_job)
-    await repository.commit()
 
     session.flush.assert_awaited_once_with()
-    session.commit.assert_awaited_once_with()
+    session.commit.assert_not_awaited()
     assert result is publish_job

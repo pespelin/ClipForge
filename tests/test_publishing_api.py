@@ -19,6 +19,7 @@ from app.core.exceptions import (
     UnusablePublishArtifactError,
     VideoRenderNotFoundError,
 )
+from app.db.session import get_db_session
 from app.models.publish_job import PublishStatus
 
 
@@ -141,7 +142,7 @@ class FakeService:
         current.error_message = f"Publishing task enqueue failed: {error}"
         self.enqueue_failures.append((current, error))
 
-    async def cancel_publish_job_and_commit(self, publish_job_id):
+    async def cancel_publish_job(self, publish_job_id):
         if self.current.status in {PublishStatus.PUBLISHING, PublishStatus.PUBLISHED}:
             raise PublishCancellationConflictError
         self.current.status = PublishStatus.CANCELLED
@@ -151,11 +152,25 @@ class FakeService:
         return self.current
 
 
-def client_for(service) -> TestClient:
+class FakeSession:
+    def __init__(self) -> None:
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def client_for(service, session: FakeSession | None = None) -> TestClient:
+    session = session or FakeSession()
     app = FastAPI()
     register_exception_handlers(app)
     app.include_router(endpoint_module.router, prefix="/api/v1")
     app.dependency_overrides[get_publishing_service] = lambda: service
+    app.dependency_overrides[get_db_session] = lambda: session
     return TestClient(app)
 
 
@@ -166,31 +181,36 @@ def client_for(service) -> TestClient:
 def test_create_immediate_or_due_job_queues_and_returns_202(monkeypatch, scheduled) -> None:
     current = publish_job(PublishStatus.PENDING, id=12, scheduled_publish_at=scheduled)
     service = FakeService(current, should_enqueue=True)
+    session = FakeSession()
     queued = []
     monkeypatch.setattr(endpoint_module.execute_publish, "delay", queued.append)
 
-    with client_for(service) as client:
+    with client_for(service, session) as client:
         response = client.post("/api/v1/renders/4/publish-jobs", json=request_body(scheduled))
 
     assert response.status_code == 202
     assert response.json()["status"] == "pending"
     assert queued == [12]
     assert service.created[0][0] == 4
+    assert session.commits == 1
+    assert session.rollbacks == 0
 
 
 def test_create_future_job_is_committed_pending_without_enqueue(monkeypatch) -> None:
     future = datetime.now(UTC) + timedelta(hours=1)
     current = publish_job(PublishStatus.PENDING, scheduled_publish_at=future)
     service = FakeService(current, should_enqueue=False)
+    session = FakeSession()
     queued = []
     monkeypatch.setattr(endpoint_module.execute_publish, "delay", queued.append)
 
-    with client_for(service) as client:
+    with client_for(service, session) as client:
         response = client.post("/api/v1/renders/4/publish-jobs", json=request_body(future))
 
     assert response.status_code == 202
     assert response.json()["scheduled_publish_at"] == future.isoformat().replace("+00:00", "Z")
     assert queued == []
+    assert session.commits == 1
 
 
 def test_multiple_creates_make_distinct_variants(monkeypatch) -> None:
@@ -221,10 +241,13 @@ def test_create_maps_service_errors(error, expected_status: int) -> None:
         async def request_publish_job(self, render_id, request):
             raise error
 
-    with client_for(FailingService()) as client:
+    session = FakeSession()
+    with client_for(FailingService(), session) as client:
         response = client.post("/api/v1/renders/4/publish-jobs", json=request_body())
 
     assert response.status_code == expected_status
+    assert session.commits == 0
+    assert session.rollbacks == 1
 
 
 def test_invalid_request_returns_422() -> None:
@@ -238,18 +261,21 @@ def test_invalid_request_returns_422() -> None:
 def test_create_broker_failure_returns_503_and_persists_same_failed_job(monkeypatch) -> None:
     current = publish_job(PublishStatus.PENDING)
     service = FakeService(current)
+    session = FakeSession()
 
     def fail(publish_job_id: int) -> None:
         raise RuntimeError("broker unavailable")
 
     monkeypatch.setattr(endpoint_module.execute_publish, "delay", fail)
-    with client_for(service) as client:
+    with client_for(service, session) as client:
         response = client.post("/api/v1/renders/4/publish-jobs", json=request_body())
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Publishing could not be queued"}
     assert current.status == PublishStatus.FAILED
     assert current.error_message == "Publishing task enqueue failed: broker unavailable"
+    assert session.commits == 2
+    assert session.rollbacks == 0
 
 
 @pytest.mark.parametrize(
@@ -263,13 +289,15 @@ def test_create_broker_failure_returns_503_and_persists_same_failed_job(monkeypa
 )
 def test_get_nonpublished_job_returns_status(state, message) -> None:
     current = publish_job(state, error_message=message)
-    with client_for(FakeService(current)) as client:
+    session = FakeSession()
+    with client_for(FakeService(current), session) as client:
         response = client.get("/api/v1/publish-jobs/1")
 
     assert response.status_code == 200
     assert response.json()["status"] == state.value
     assert response.json()["error_message"] == message
     assert "remote_media_id" not in response.json()
+    assert session.commits == 0
 
 
 def test_get_published_job_returns_full_response() -> None:
@@ -293,11 +321,13 @@ def test_get_missing_job_returns_404() -> None:
 def test_list_mixed_variants_newest_first_and_empty() -> None:
     newest = publish_job(PublishStatus.PENDING, id=2)
     oldest = published_job(id=1)
-    with client_for(FakeService(jobs=[newest, oldest])) as client:
+    session = FakeSession()
+    with client_for(FakeService(jobs=[newest, oldest]), session) as client:
         mixed = client.get("/api/v1/renders/4/publish-jobs")
     assert [item["id"] for item in mixed.json()] == [2, 1]
     assert "remote_media_id" not in mixed.json()[0]
     assert mixed.json()[1]["remote_media_id"] == "local-youtube-abc"
+    assert session.commits == 0
 
     with client_for(FakeService(jobs=[])) as client:
         assert client.get("/api/v1/renders/4/publish-jobs").json() == []
@@ -318,10 +348,11 @@ def test_retry_reuses_row_preserves_intent_and_respects_schedule(
     current.tags = ["Editing"]
     current.publish_options = {"visibility": "private"}
     service = FakeService(current, jobs=[current], should_enqueue=not future)
+    session = FakeSession()
     queued = []
     monkeypatch.setattr(endpoint_module.execute_publish, "delay", queued.append)
 
-    with client_for(service) as client:
+    with client_for(service, session) as client:
         response = client.post("/api/v1/publish-jobs/9/retry")
 
     assert response.status_code == 202
@@ -329,6 +360,7 @@ def test_retry_reuses_row_preserves_intent_and_respects_schedule(
     assert current.error_message is None if state == PublishStatus.FAILED else "Old"
     assert queued == ([] if future else [9])
     assert len(service.jobs) == 1
+    assert session.commits == 1
     assert (
         current.source_storage_key,
         current.source_checksum,
@@ -353,44 +385,54 @@ def test_retry_active_or_published_returns_200_without_enqueue(monkeypatch, stat
     current = published_job() if state == PublishStatus.PUBLISHED else publish_job(state)
     service = FakeService(current, should_enqueue=False)
     queued = []
+    session = FakeSession()
     monkeypatch.setattr(endpoint_module.execute_publish, "delay", queued.append)
-    with client_for(service) as client:
+    with client_for(service, session) as client:
         response = client.post("/api/v1/publish-jobs/1/retry")
     assert response.status_code == 200
     assert queued == []
+    assert session.commits == 0
+    assert session.rollbacks == 0
 
 
 def test_retry_cancelled_returns_409() -> None:
-    with client_for(FakeService(publish_job(PublishStatus.CANCELLED))) as client:
+    session = FakeSession()
+    with client_for(FakeService(publish_job(PublishStatus.CANCELLED)), session) as client:
         response = client.post("/api/v1/publish-jobs/1/retry")
     assert response.status_code == 409
+    assert session.commits == 0
+    assert session.rollbacks == 1
 
 
 def test_retry_broker_failure_returns_503(monkeypatch) -> None:
     current = publish_job(PublishStatus.FAILED)
     service = FakeService(current)
+    session = FakeSession()
 
     def fail(publish_job_id: int) -> None:
         raise RuntimeError("broker unavailable")
 
     monkeypatch.setattr(endpoint_module.execute_publish, "delay", fail)
-    with client_for(service) as client:
+    with client_for(service, session) as client:
         response = client.post("/api/v1/publish-jobs/1/retry")
     assert response.status_code == 503
     assert current.status == PublishStatus.FAILED
+    assert session.commits == 2
 
 
 @pytest.mark.parametrize("state", [PublishStatus.PENDING, PublishStatus.FAILED])
 def test_cancel_pending_or_failed_commits_without_enqueue(monkeypatch, state) -> None:
     current = publish_job(state)
     service = FakeService(current)
+    session = FakeSession()
     queued = []
     monkeypatch.setattr(endpoint_module.execute_publish, "delay", queued.append)
-    with client_for(service) as client:
+    with client_for(service, session) as client:
         response = client.post("/api/v1/publish-jobs/1/cancel")
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
     assert queued == []
+    assert session.commits == 1
 
 
 def test_cancelled_is_idempotent() -> None:

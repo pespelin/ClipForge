@@ -10,6 +10,7 @@ from app.api.v1.endpoints import publishing as publishing_endpoint
 from app.api.v1.router import router
 from app.core.exception_handlers import register_exception_handlers
 from app.core.exceptions import PublishingError
+from app.db.session import get_db_session
 from app.models.publish_job import PublishJob, PublishStatus
 from app.models.video_render import (
     RenderAudioCodec,
@@ -119,9 +120,6 @@ class InMemoryPublishJobRepository:
         self.state.events.append(f"save:{publish_job.id}:{publish_job.status.value}")
         return publish_job
 
-    async def commit(self) -> None:
-        await self.session.commit()
-
 
 class CountingLocalPublishingProvider(LocalPublishingProvider):
     def __init__(self) -> None:
@@ -154,6 +152,7 @@ class Phase8Harness:
         register_exception_handlers(self.app)
         self.app.include_router(router, prefix="/api/v1")
         self.app.dependency_overrides[get_publishing_service] = lambda: self.service
+        self.app.dependency_overrides[get_db_session] = lambda: self.session
 
         def publish(publish_job_id: int) -> None:
             assert self.state.events[-1] == "commit"

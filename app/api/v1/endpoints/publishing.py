@@ -1,6 +1,8 @@
+from collections.abc import Awaitable
+
 from fastapi import APIRouter, Response, status
 
-from app.api.dependencies import PublishingServiceDependency
+from app.api.dependencies import DatabaseSession, PublishingServiceDependency
 from app.core.exceptions import PublishEnqueueError
 from app.models.publish_job import PublishJob, PublishStatus
 from app.schemas.publish_job import (
@@ -21,11 +23,29 @@ def _response_for(publish_job: PublishJob) -> PublishJobAPIResponse:
     return PublishJobStatusResponse.model_validate(publish_job)
 
 
-async def _enqueue(publish_job: PublishJob, service: PublishingServiceDependency) -> None:
+async def _execute_write[T](session: DatabaseSession, operation: Awaitable[T]) -> T:
+    try:
+        result = await operation
+        await _commit(session)
+        return result
+    except Exception:
+        await session.rollback()
+        raise
+
+
+async def _commit(session: DatabaseSession) -> None:
+    await session.commit()
+
+
+async def _enqueue(
+    publish_job: PublishJob,
+    service: PublishingServiceDependency,
+    session: DatabaseSession,
+) -> None:
     try:
         execute_publish.delay(publish_job.id)
     except Exception as error:
-        await service.mark_publish_enqueue_failed(publish_job, error)
+        await _execute_write(session, service.mark_publish_enqueue_failed(publish_job, error))
         raise PublishEnqueueError from error
 
 
@@ -38,10 +58,13 @@ async def create_publish_job(
     video_render_id: int,
     request: PublishRequest,
     service: PublishingServiceDependency,
+    session: DatabaseSession,
 ) -> PublishJobAPIResponse:
-    publish_job, should_enqueue = await service.request_publish_job(video_render_id, request)
+    publish_job, should_enqueue = await _execute_write(
+        session, service.request_publish_job(video_render_id, request)
+    )
     if should_enqueue:
-        await _enqueue(publish_job, service)
+        await _enqueue(publish_job, service, session)
     return _response_for(publish_job)
 
 
@@ -68,12 +91,22 @@ async def retry_publish_job(
     publish_job_id: int,
     response: Response,
     service: PublishingServiceDependency,
+    session: DatabaseSession,
 ) -> PublishJobAPIResponse:
-    publish_job, should_enqueue = await service.prepare_publish_retry(publish_job_id)
+    try:
+        publish_job, should_enqueue = await service.prepare_publish_retry(publish_job_id)
+    except Exception:
+        await session.rollback()
+        raise
     if publish_job.status in {PublishStatus.PUBLISHED, PublishStatus.PUBLISHING}:
         return _response_for(publish_job)
+    try:
+        await _commit(session)
+    except Exception:
+        await session.rollback()
+        raise
     if should_enqueue:
-        await _enqueue(publish_job, service)
+        await _enqueue(publish_job, service, session)
     response.status_code = status.HTTP_202_ACCEPTED
     return _response_for(publish_job)
 
@@ -83,7 +116,9 @@ async def retry_publish_job(
     response_model=PublishJobStatusResponse,
 )
 async def cancel_publish_job(
-    publish_job_id: int, service: PublishingServiceDependency
+    publish_job_id: int,
+    service: PublishingServiceDependency,
+    session: DatabaseSession,
 ) -> PublishJobStatusResponse:
-    publish_job = await service.cancel_publish_job_and_commit(publish_job_id)
+    publish_job = await _execute_write(session, service.cancel_publish_job(publish_job_id))
     return PublishJobStatusResponse.model_validate(publish_job)

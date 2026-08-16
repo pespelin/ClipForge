@@ -31,6 +31,3 @@ class PublishJobRepository(BaseRepository[PublishJob]):
     async def save(self, publish_job: PublishJob) -> PublishJob:
         await self.session.flush()
         return publish_job
-
-    async def commit(self) -> None:
-        await self.session.commit()
