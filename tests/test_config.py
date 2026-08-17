@@ -21,6 +21,7 @@ def test_youtube_settings_default_to_local_and_none() -> None:
     assert settings.youtube_oauth_client_id is None
     assert settings.youtube_oauth_client_secret is None
     assert settings.youtube_oauth_redirect_uri is None
+    assert settings.oauth_state_ttl_seconds == 600
     assert settings.credential_encryption_key is None
 
 
@@ -74,3 +75,19 @@ def test_credential_encryption_key_is_parsed_and_redacted(
     assert settings.credential_encryption_key.get_secret_value() == test_key
     assert test_key not in repr(settings)
     assert test_key not in repr(settings.credential_encryption_key)
+
+
+def test_oauth_state_ttl_is_parsed_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OAUTH_STATE_TTL_SECONDS", "900")
+
+    assert get_settings().oauth_state_ttl_seconds == 900
+
+
+@pytest.mark.parametrize("invalid_ttl", ["0", "-1"])
+def test_oauth_state_ttl_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, invalid_ttl: str
+) -> None:
+    monkeypatch.setenv("OAUTH_STATE_TTL_SECONDS", invalid_ttl)
+
+    with pytest.raises(ValidationError):
+        get_settings()
