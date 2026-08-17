@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import secrets
 from dataclasses import dataclass
 from typing import Protocol
@@ -39,3 +41,9 @@ def generate_oauth_state() -> str:
 def generate_pkce_code_verifier() -> str:
     """Return an RFC 7636-compatible URL-safe PKCE verifier."""
     return secrets.token_urlsafe(64)
+
+
+def create_pkce_code_challenge(code_verifier: str) -> str:
+    """Return the RFC 7636 S256 challenge for a PKCE verifier."""
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")

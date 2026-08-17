@@ -7,6 +7,7 @@ from app.security.oauth_state import (
     OAuthAuthorizationState,
     OAuthAuthorizationStateStore,
     OAuthStateStoreError,
+    create_pkce_code_challenge,
     generate_oauth_state,
     generate_pkce_code_verifier,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "OAuthAuthorizationStateStore",
     "OAuthStateStoreError",
     "RedisOAuthAuthorizationStateStore",
+    "create_pkce_code_challenge",
     "generate_oauth_state",
     "generate_pkce_code_verifier",
 ]

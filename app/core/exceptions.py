@@ -207,6 +207,30 @@ class PublishEnqueueError(AppError):
     detail = "Publishing could not be queued"
 
 
+class PublishingAccountNotFoundError(ResourceNotFoundError):
+    detail = "Publishing account not found"
+
+
+class PublishingAccountInactiveError(AppError):
+    status_code = 409
+    detail = "Publishing account is inactive"
+
+
+class UnsupportedOAuthPublishingPlatformError(AppError):
+    status_code = 409
+    detail = "Publishing account platform does not support OAuth authorization"
+
+
+class OAuthAuthorizationConfigurationError(AppError):
+    status_code = 503
+    detail = "OAuth authorization is not configured"
+
+
+class OAuthAuthorizationUnavailableError(AppError):
+    status_code = 503
+    detail = "OAuth authorization is temporarily unavailable"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

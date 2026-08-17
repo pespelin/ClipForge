@@ -3,6 +3,7 @@ import re
 from app.security import (
     OAuthAuthorizationState,
     OAuthAuthorizationStateStore,
+    create_pkce_code_challenge,
     generate_oauth_state,
     generate_pkce_code_verifier,
 )
@@ -50,3 +51,12 @@ def test_pkce_verifier_generation_is_secure_random_and_rfc_7636_compatible() -> 
     assert 43 <= len(second) <= 128
     assert re.fullmatch(r"[A-Za-z0-9._~-]+", first)
     assert re.fullmatch(r"[A-Za-z0-9._~-]+", second)
+
+
+def test_pkce_s256_challenge_matches_rfc_7636_vector_without_padding() -> None:
+    verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+
+    challenge = create_pkce_code_challenge(verifier)
+
+    assert challenge == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    assert "=" not in challenge
