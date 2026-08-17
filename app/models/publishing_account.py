@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -10,10 +13,13 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.publish_job import PublishPlatform
+
+if TYPE_CHECKING:
+    from app.models.oauth_credential import OAuthCredential
 
 
 class PublishingAccount(Base):
@@ -58,4 +64,10 @@ class PublishingAccount(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    oauth_credential: Mapped[OAuthCredential | None] = relationship(
+        back_populates="publishing_account",
+        cascade="all, delete-orphan",
+        single_parent=True,
+        passive_deletes=True,
     )

@@ -9,6 +9,7 @@ from app.models.broll import (
     BrollOrientation,
     BrollProvider,
 )
+from app.models.oauth_credential import OAuthCredential
 from app.models.publish_job import (
     PublishJob,
     PublishPlatform,
@@ -41,6 +42,7 @@ __all__ = [
     "BrollMediaType",
     "BrollOrientation",
     "BrollProvider",
+    "OAuthCredential",
     "PublishJob",
     "PublishPlatform",
     "PublishStatus",
