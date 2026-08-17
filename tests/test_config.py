@@ -21,6 +21,7 @@ def test_youtube_settings_default_to_local_and_none() -> None:
     assert settings.youtube_oauth_client_id is None
     assert settings.youtube_oauth_client_secret is None
     assert settings.youtube_oauth_redirect_uri is None
+    assert settings.credential_encryption_key is None
 
 
 @pytest.mark.parametrize("provider", ["local", "youtube"])
@@ -59,3 +60,17 @@ def test_youtube_oauth_fields_are_parsed_and_secret_is_redacted(
     )
     assert test_secret not in repr(settings)
     assert test_secret not in repr(settings.youtube_oauth_client_secret)
+
+
+def test_credential_encryption_key_is_parsed_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    test_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", test_key)
+
+    settings = get_settings()
+
+    assert isinstance(settings.credential_encryption_key, SecretStr)
+    assert settings.credential_encryption_key.get_secret_value() == test_key
+    assert test_key not in repr(settings)
+    assert test_key not in repr(settings.credential_encryption_key)

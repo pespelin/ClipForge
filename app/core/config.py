@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     youtube_oauth_client_id: str | None = None
     youtube_oauth_client_secret: SecretStr | None = None
     youtube_oauth_redirect_uri: str | None = None
+    credential_encryption_key: SecretStr | None = None
 
     @property
     def database_url(self) -> str:
