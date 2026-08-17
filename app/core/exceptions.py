@@ -231,6 +231,33 @@ class OAuthAuthorizationUnavailableError(AppError):
     detail = "OAuth authorization is temporarily unavailable"
 
 
+class OAuthCallbackValidationError(AppError):
+    detail = "OAuth callback parameters are invalid"
+
+
+class OAuthInvalidStateError(AppError):
+    detail = "OAuth state is invalid, expired, or already used"
+
+
+class OAuthConsentDeniedError(AppError):
+    detail = "OAuth authorization was denied"
+
+
+class OAuthCallbackConfigurationError(AppError):
+    status_code = 503
+    detail = "OAuth callback is not configured"
+
+
+class OAuthTokenExchangeFailedError(AppError):
+    status_code = 502
+    detail = "OAuth token exchange failed"
+
+
+class OAuthCredentialPersistenceError(AppError):
+    status_code = 500
+    detail = "OAuth credential persistence failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

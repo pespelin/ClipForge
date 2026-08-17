@@ -1,20 +1,27 @@
+from collections.abc import AsyncGenerator
 from typing import Annotated
 
+import httpx
 from fastapi import Depends
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.exceptions import OAuthCallbackConfigurationError
 from app.core.redis import get_redis
 from app.db.session import get_db_session
 from app.providers.analysis import LocalVideoAnalyzer
 from app.providers.media import LocalMediaProvider
-from app.providers.oauth import GoogleOAuthAuthorizationProvider
+from app.providers.oauth import (
+    GoogleOAuthAuthorizationProvider,
+    GoogleOAuthTokenExchangeProvider,
+)
 from app.providers.publishing import create_publishing_provider
 from app.providers.render import FFmpegVideoRenderer
 from app.providers.script import LocalScriptGenerator
 from app.providers.tts import LocalTTSProvider
 from app.repositories.broll_repository import BrollAssetRepository, BrollCollectionRepository
+from app.repositories.oauth_credential_repository import OAuthCredentialRepository
 from app.repositories.publish_job_repository import PublishJobRepository
 from app.repositories.publishing_account_repository import PublishingAccountRepository
 from app.repositories.script_repository import ScriptRepository
@@ -22,10 +29,16 @@ from app.repositories.video_analysis_repository import VideoAnalysisRepository
 from app.repositories.video_render_repository import VideoRenderRepository
 from app.repositories.video_repository import VideoRepository
 from app.repositories.voice_track_repository import VoiceTrackRepository
-from app.security import RedisOAuthAuthorizationStateStore
+from app.security import (
+    CredentialEncryptionError,
+    FernetCredentialEncryptor,
+    RedisOAuthAuthorizationStateStore,
+)
 from app.services.broll_retrieval_service import BrollRetrievalService
 from app.services.ffmpeg_service import FFmpegService
 from app.services.oauth_authorization_service import OAuthAuthorizationService
+from app.services.oauth_callback_service import OAuthCallbackService
+from app.services.oauth_credential_service import OAuthCredentialService
 from app.services.publishing_service import PublishingService
 from app.services.script_generation_service import ScriptGenerationService
 from app.services.storage_service import StorageService
@@ -37,6 +50,14 @@ from app.services.whisper_service import WhisperService
 
 DatabaseSession = Annotated[AsyncSession, Depends(get_db_session)]
 RedisClient = Annotated[Redis, Depends(get_redis)]
+
+
+async def get_oauth_http_client() -> AsyncGenerator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        yield client
+
+
+OAuthHttpClient = Annotated[httpx.AsyncClient, Depends(get_oauth_http_client)]
 
 
 def get_video_service(session: DatabaseSession) -> VideoService:
@@ -149,4 +170,53 @@ def get_oauth_authorization_service(
 
 OAuthAuthorizationServiceDependency = Annotated[
     OAuthAuthorizationService, Depends(get_oauth_authorization_service)
+]
+
+
+def get_oauth_callback_service(
+    session: DatabaseSession,
+    redis_client: RedisClient,
+    http_client: OAuthHttpClient,
+) -> OAuthCallbackService:
+    settings = get_settings()
+    client_secret = (
+        settings.youtube_oauth_client_secret.get_secret_value()
+        if settings.youtube_oauth_client_secret is not None
+        else None
+    )
+    encryption_key = (
+        settings.credential_encryption_key.get_secret_value()
+        if settings.credential_encryption_key is not None
+        else None
+    )
+    if not (
+        settings.youtube_oauth_client_id
+        and client_secret
+        and settings.youtube_oauth_redirect_uri
+        and encryption_key
+    ):
+        raise OAuthCallbackConfigurationError
+
+    try:
+        encryptor = FernetCredentialEncryptor(encryption_key)
+    except CredentialEncryptionError:
+        raise OAuthCallbackConfigurationError from None
+    return OAuthCallbackService(
+        account_repository=PublishingAccountRepository(session),
+        state_store=RedisOAuthAuthorizationStateStore(redis_client),
+        token_exchange_provider=GoogleOAuthTokenExchangeProvider(
+            http_client,
+            client_id=settings.youtube_oauth_client_id,
+            client_secret=client_secret,
+            redirect_uri=settings.youtube_oauth_redirect_uri,
+        ),
+        credential_service=OAuthCredentialService(
+            OAuthCredentialRepository(session),
+            encryptor,
+        ),
+    )
+
+
+OAuthCallbackServiceDependency = Annotated[
+    OAuthCallbackService, Depends(get_oauth_callback_service)
 ]
