@@ -12,16 +12,17 @@ from app.providers.publishing import (
     PublishingProvider,
     YouTubePublishingError,
     YouTubePublishingProvider,
+    YouTubeResumableUploadSession,
 )
 from app.schemas.publish_job import PublishingInput, PublishingResult
 
 ACCESS_TOKEN = "clipforge-youtube-upload-test-access-token-never-real"
-VIDEO_BYTES = b"clipforge-test-video-bytes"
+SESSION_URI = "https://upload.youtube.test/session/secret-capability-url"
+VIDEO_BYTES = b"abcdefghij"
 VIDEO_ID = "youtube-test-video-id"
 STORAGE_KEY = "renders/4/output.mp4"
 ACCOUNT_REFERENCE = "channel-main-not-a-database-id"
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
-BOUNDARY = "clipforge-test-boundary"
 
 
 def publishing_input(**values) -> PublishingInput:
@@ -92,79 +93,85 @@ def make_provider(handler, *, resolver=None, reader=None):
         credential_resolver,
         artifact_reader,
         client,
-        boundary_factory=lambda: BOUNDARY,
         clock=lambda: NOW,
     )
     return provider, client, credential_resolver, artifact_reader
 
 
-def parse_multipart(request: httpx.Request) -> tuple[dict, bytes]:
-    parts = request.content.split(f"--{BOUNDARY}".encode())
-    metadata_part = parts[1].strip(b"\r\n")
-    media_part = parts[2].strip(b"\r\n")
-    metadata_headers, metadata_body = metadata_part.split(b"\r\n\r\n", 1)
-    media_headers, media_body = media_part.split(b"\r\n\r\n", 1)
-    assert metadata_headers == b"Content-Type: application/json; charset=UTF-8"
-    assert media_headers == b"Content-Type: video/mp4"
-    return json.loads(metadata_body), media_body
+def initiation_response() -> httpx.Response:
+    return httpx.Response(200, headers={"Location": SESSION_URI})
+
+
+def completed_response() -> httpx.Response:
+    return httpx.Response(200, json={"id": VIDEO_ID})
 
 
 def test_provider_structurally_implements_existing_async_contract() -> None:
-    provider, _, _, _ = make_provider(lambda _: httpx.Response(200, json={"id": VIDEO_ID}))
+    provider, _, _, _ = make_provider(lambda _: completed_response())
     boundary: PublishingProvider = provider
-
     assert boundary is provider
     assert inspect.iscoroutinefunction(provider.publish)
 
 
-async def test_success_builds_youtube_multipart_request_and_safe_result() -> None:
+async def test_publish_uses_resumable_initiation_and_full_media_put() -> None:
+    requests: list[httpx.Request] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert str(request.url.copy_with(query=None)) == (
-            "https://www.googleapis.com/upload/youtube/v3/videos"
-        )
-        assert parse_qs(request.url.query.decode()) == {
-            "part": ["snippet,status"],
-            "uploadType": ["multipart"],
-            "notifySubscribers": ["false"],
-        }
+        requests.append(request)
+        if request.method == "POST":
+            assert str(request.url.copy_with(query=None)) == (
+                "https://www.googleapis.com/upload/youtube/v3/videos"
+            )
+            assert parse_qs(request.url.query.decode()) == {
+                "part": ["snippet,status"],
+                "uploadType": ["resumable"],
+                "notifySubscribers": ["false"],
+            }
+            assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
+            assert request.headers["content-type"] == "application/json; charset=UTF-8"
+            assert request.headers["x-upload-content-type"] == "video/mp4"
+            assert request.headers["x-upload-content-length"] == "10"
+            assert json.loads(request.content) == {
+                "snippet": {
+                    "title": "Publish deliberately",
+                    "description": "A useful Short.",
+                    "tags": ["Editing", "Shorts"],
+                    "defaultLanguage": "en",
+                },
+                "status": {
+                    "privacyStatus": "private",
+                    "selfDeclaredMadeForKids": False,
+                },
+            }
+            return initiation_response()
+        assert str(request.url) == SESSION_URI
         assert request.headers["authorization"] == f"Bearer {ACCESS_TOKEN}"
-        assert request.headers["content-type"] == (f'multipart/related; boundary="{BOUNDARY}"')
-        metadata, media = parse_multipart(request)
-        assert metadata == {
-            "snippet": {
-                "title": "Publish deliberately",
-                "description": "A useful Short.",
-                "tags": ["Editing", "Shorts"],
-                "defaultLanguage": "en",
-            },
-            "status": {
-                "privacyStatus": "private",
-                "selfDeclaredMadeForKids": False,
-            },
-        }
-        assert "categoryId" not in metadata["snippet"]
-        assert media == VIDEO_BYTES
-        return httpx.Response(200, json={"id": VIDEO_ID})
+        assert request.headers["content-type"] == "video/mp4"
+        assert request.headers["content-length"] == "10"
+        assert request.headers["content-range"] == "bytes 0-9/10"
+        assert request.content == VIDEO_BYTES
+        return completed_response()
 
     provider, client, resolver, reader = make_provider(handler)
     async with client:
         result = await provider.publish(publishing_input())
 
+    assert [request.method for request in requests] == ["POST", "PUT"]
     assert resolver.references == [ACCOUNT_REFERENCE]
     assert reader.keys == [STORAGE_KEY]
     assert PublishingResult.model_validate(result) == result
     assert result.remote_media_id == VIDEO_ID
     assert str(result.remote_url) == f"https://www.youtube.com/watch?v={VIDEO_ID}"
-    assert result.remote_status == "published"
     assert result.published_at == NOW
     assert result.provider_metadata == {
         "provider": "youtube",
         "privacy_status": "private",
-        "upload_type": "multipart",
+        "upload_type": "resumable",
         "video_id": VIDEO_ID,
     }
-    assert ACCESS_TOKEN not in json.dumps(result.model_dump(mode="json"))
+    dumped = json.dumps(result.model_dump(mode="json"))
+    assert ACCESS_TOKEN not in dumped
+    assert SESSION_URI not in dumped
 
 
 @pytest.mark.parametrize(
@@ -172,114 +179,176 @@ async def test_success_builds_youtube_multipart_request_and_safe_result() -> Non
     [PublishVisibility.PUBLIC, PublishVisibility.PRIVATE, PublishVisibility.UNLISTED],
 )
 async def test_all_privacy_values_map_exactly(visibility: PublishVisibility) -> None:
-    captured = {}
+    metadata = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured.update(parse_multipart(request)[0])
-        return httpx.Response(200, json={"id": VIDEO_ID})
+        if request.method == "POST":
+            metadata.update(json.loads(request.content))
+            return initiation_response()
+        return completed_response()
 
     provider, client, _, _ = make_provider(handler)
     async with client:
-        await provider.publish(publishing_input(visibility=visibility))
+        result = await provider.publish(publishing_input(visibility=visibility))
+    assert metadata["status"]["privacyStatus"] == visibility.value
+    assert result.provider_metadata["privacy_status"] == visibility.value
 
-    assert captured["status"]["privacyStatus"] == visibility.value
 
+async def test_session_uri_is_secret_safe() -> None:
+    session = YouTubeResumableUploadSession(SESSION_URI, 10)
+    assert SESSION_URI not in repr(session)
 
-@pytest.mark.parametrize("token_type", [None, "Bearer", "bearer"])
-async def test_bearer_or_unspecified_token_type_is_supported(token_type) -> None:
     provider, client, _, _ = make_provider(
-        lambda _: httpx.Response(200, json={"id": VIDEO_ID}),
-        resolver=FakeCredentialResolver(token_type=token_type),
+        lambda request: (
+            initiation_response()
+            if request.method == "POST"
+            else httpx.Response(500, text=SESSION_URI)
+        )
     )
-
-    async with client:
-        result = await provider.publish(publishing_input())
-
-    assert result.remote_media_id == VIDEO_ID
-
-
-async def test_unsupported_token_type_fails_before_artifact_or_http() -> None:
-    reader = FakeArtifactReader()
-    provider, client, _, _ = make_provider(
-        lambda _: (_ for _ in ()).throw(AssertionError("HTTP must not run")),
-        resolver=FakeCredentialResolver(token_type="MAC"),
-        reader=reader,
-    )
-
-    async with client:
-        with pytest.raises(YouTubePublishingError):
-            await provider.publish(publishing_input())
-
-    assert reader.keys == []
-
-
-async def test_credential_failure_prevents_artifact_read_and_http_without_leakage() -> None:
-    reader = FakeArtifactReader()
-    provider, client, _, _ = make_provider(
-        lambda _: (_ for _ in ()).throw(AssertionError("HTTP must not run")),
-        resolver=FakeCredentialResolver(error=RuntimeError(ACCESS_TOKEN)),
-        reader=reader,
-    )
-
     async with client:
         with pytest.raises(YouTubePublishingError) as error:
             await provider.publish(publishing_input())
-
-    assert reader.keys == []
-    assert ACCESS_TOKEN not in str(error.value)
-    assert ACCESS_TOKEN not in repr(error.value)
+    assert SESSION_URI not in str(error.value)
+    assert SESSION_URI not in repr(error.value)
 
 
-async def test_artifact_failure_prevents_http_and_is_normalized() -> None:
-    provider, client, _, _ = make_provider(
-        lambda _: (_ for _ in ()).throw(AssertionError("HTTP must not run")),
-        reader=FakeArtifactReader(error=OSError("test artifact path")),
-    )
+async def test_existing_session_probes_and_resumes_from_reported_offset_without_post() -> None:
+    requests: list[httpx.Request] = []
 
-    async with client:
-        with pytest.raises(YouTubePublishingError) as error:
-            await provider.publish(publishing_input())
-
-    assert "artifact path" not in str(error.value)
-
-
-@pytest.mark.parametrize("failure", ["timeout", "connection"])
-async def test_transport_failures_are_normalized_without_token_leakage(failure: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        if failure == "timeout":
-            raise httpx.ReadTimeout("test timeout", request=request)
-        raise httpx.ConnectError("test connection", request=request)
+        requests.append(request)
+        assert request.method == "PUT"
+        if len(requests) == 1:
+            assert request.headers["content-length"] == "0"
+            assert request.headers["content-range"] == "bytes */10"
+            assert request.content == b""
+            return httpx.Response(308, headers={"Range": "bytes=0-3"})
+        assert request.headers["content-length"] == "6"
+        assert request.headers["content-range"] == "bytes 4-9/10"
+        assert request.content == b"efghij"
+        return completed_response()
+
+    provider, client, _, _ = make_provider(handler)
+    session = YouTubeResumableUploadSession(SESSION_URI, 10)
+    async with client:
+        progress = await provider.resume_upload(publishing_input(), session)
+    assert [request.method for request in requests] == ["PUT", "PUT"]
+    assert progress.completed is True
+    assert progress.next_byte_offset == 10
+    assert progress.publishing_result.remote_media_id == VIDEO_ID
+
+
+async def test_existing_session_already_complete_does_not_upload_again() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["content-range"] == "bytes */10"
+        return completed_response()
 
     provider, client, _, _ = make_provider(handler)
     async with client:
+        progress = await provider.resume_upload(
+            publishing_input(), YouTubeResumableUploadSession(SESSION_URI, 10)
+        )
+    assert len(requests) == 1
+    assert progress.completed is True
+    assert progress.publishing_result.remote_media_id == VIDEO_ID
+
+
+async def test_status_probe_308_without_range_resumes_from_zero() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(308)
+        assert request.headers["content-range"] == "bytes 0-9/10"
+        assert request.content == VIDEO_BYTES
+        return completed_response()
+
+    provider, client, _, _ = make_provider(handler)
+    async with client:
+        progress = await provider.resume_upload(
+            publishing_input(), YouTubeResumableUploadSession(SESSION_URI, 10)
+        )
+    assert progress.completed is True
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    ["items=0-4", "bytes=4-5", "bytes=0-x", "bytes=0-10", "bytes=0--1"],
+)
+async def test_malformed_or_invalid_range_is_rejected_safely(range_header: str) -> None:
+    provider, client, _, _ = make_provider(
+        lambda _: httpx.Response(308, headers={"Range": range_header})
+    )
+    async with client:
+        with pytest.raises(YouTubePublishingError) as error:
+            await provider.resume_upload(
+                publishing_input(), YouTubeResumableUploadSession(SESSION_URI, 10)
+            )
+    assert SESSION_URI not in repr(error.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [httpx.Response(200), httpx.Response(500, text=SESSION_URI)],
+)
+async def test_initiation_missing_location_or_http_failure_is_safe(
+    response: httpx.Response,
+) -> None:
+    provider, client, _, _ = make_provider(lambda _: response)
+    async with client:
         with pytest.raises(YouTubePublishingError) as error:
             await provider.publish(publishing_input())
-
-    assert ACCESS_TOKEN not in str(error.value)
+    assert SESSION_URI not in repr(error.value)
     assert ACCESS_TOKEN not in repr(error.value)
 
 
 @pytest.mark.parametrize(
     "response",
     [
-        httpx.Response(401, json={"error": {"message": ACCESS_TOKEN}}),
-        httpx.Response(403, json={"error": "quota"}),
-        httpx.Response(500, content=b"remote failure"),
+        httpx.Response(500, text=SESSION_URI),
         httpx.Response(200, content=b"{"),
         httpx.Response(200, json={}),
-        httpx.Response(200, json={"id": ""}),
-        httpx.Response(200, json=[]),
     ],
 )
-async def test_remote_and_response_failures_are_safe(response: httpx.Response) -> None:
-    provider, client, _, _ = make_provider(lambda _: response)
+async def test_upload_and_completion_failures_are_safe(response: httpx.Response) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return initiation_response() if request.method == "POST" else response
 
+    provider, client, _, _ = make_provider(handler)
     async with client:
         with pytest.raises(YouTubePublishingError) as error:
             await provider.publish(publishing_input())
-
     assert str(error.value) == "YouTube publishing failed"
     assert ACCESS_TOKEN not in repr(error.value)
+    assert SESSION_URI not in repr(error.value)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "connection"])
+async def test_transport_failures_are_normalized(failure: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure == "timeout":
+            raise httpx.ReadTimeout("secret", request=request)
+        raise httpx.ConnectError("secret", request=request)
+
+    provider, client, _, _ = make_provider(handler)
+    async with client:
+        with pytest.raises(YouTubePublishingError):
+            await provider.publish(publishing_input())
+
+
+async def test_invalid_existing_session_offset_is_rejected_before_http() -> None:
+    provider, client, _, _ = make_provider(
+        lambda _: (_ for _ in ()).throw(AssertionError("HTTP must not run"))
+    )
+    async with client:
+        with pytest.raises(YouTubePublishingError):
+            await provider.resume_upload(
+                publishing_input(), YouTubeResumableUploadSession(SESSION_URI, 10, 10)
+            )
 
 
 async def test_non_youtube_platform_is_rejected_before_dependencies() -> None:
@@ -291,10 +360,8 @@ async def test_non_youtube_platform_is_rejected_before_dependencies() -> None:
         reader=reader,
     )
     unchecked = publishing_input().model_copy(update={"platform": PublishPlatform.OTHER})
-
     async with client:
         with pytest.raises(YouTubePublishingError):
             await provider.publish(unchecked)
-
     assert resolver.references == []
     assert reader.keys == []

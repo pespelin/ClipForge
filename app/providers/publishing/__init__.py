@@ -10,7 +10,12 @@ from app.providers.publishing.local import (
     UnsupportedPublishingPlatformError,
     UnusablePublishingInputError,
 )
-from app.providers.publishing.youtube import YouTubePublishingError, YouTubePublishingProvider
+from app.providers.publishing.youtube import (
+    YouTubePublishingError,
+    YouTubePublishingProvider,
+    YouTubeResumableUploadProgress,
+    YouTubeResumableUploadSession,
+)
 
 __all__ = [
     "LocalPublishingProvider",
@@ -22,5 +27,7 @@ __all__ = [
     "UnusablePublishingInputError",
     "YouTubePublishingError",
     "YouTubePublishingProvider",
+    "YouTubeResumableUploadProgress",
+    "YouTubeResumableUploadSession",
     "create_publishing_provider",
 ]
