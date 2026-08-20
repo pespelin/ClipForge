@@ -24,6 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.publishing_upload_session import PublishingUploadSession
     from app.models.video_render import VideoRender
 
 
@@ -175,3 +176,9 @@ class PublishJob(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     video_render: Mapped[VideoRender] = relationship(back_populates="publish_jobs")
+    upload_session: Mapped[PublishingUploadSession | None] = relationship(
+        back_populates="publish_job",
+        cascade="all, delete-orphan",
+        single_parent=True,
+        passive_deletes=True,
+    )

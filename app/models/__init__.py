@@ -17,6 +17,7 @@ from app.models.publish_job import (
     PublishVisibility,
 )
 from app.models.publishing_account import PublishingAccount
+from app.models.publishing_upload_session import PublishingUploadSession
 from app.models.script import Script, ScriptStatus, ScriptTone
 from app.models.video import Transcript, Video
 from app.models.video_analysis import AnalysisStatus, VideoAnalysis
@@ -48,6 +49,7 @@ __all__ = [
     "PublishStatus",
     "PublishVisibility",
     "PublishingAccount",
+    "PublishingUploadSession",
     "RenderAudioCodec",
     "RenderFitMode",
     "RenderOutputFormat",
