@@ -9,6 +9,13 @@ class OAuthTokenExchangeError(Exception):
         super().__init__("OAuth token exchange failed")
 
 
+class OAuthTokenRefreshError(Exception):
+    """Raised when an OAuth access token cannot be refreshed safely."""
+
+    def __init__(self) -> None:
+        super().__init__("OAuth token refresh failed")
+
+
 @dataclass(frozen=True, slots=True)
 class OAuthTokenResult:
     access_token: str = field(repr=False)
@@ -41,4 +48,12 @@ class OAuthTokenExchangeProvider(Protocol):
         self, *, authorization_code: str, code_verifier: str
     ) -> OAuthTokenResult:
         """Exchange a code without exposing provider or transport details."""
+        ...
+
+
+class OAuthTokenRefreshProvider(Protocol):
+    """Provider boundary for refreshing an OAuth access token."""
+
+    async def refresh_token(self, *, refresh_token: str) -> OAuthTokenResult:
+        """Refresh an access token without exposing transport details."""
         ...

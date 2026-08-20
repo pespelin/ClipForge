@@ -258,6 +258,21 @@ class OAuthCredentialPersistenceError(AppError):
     detail = "OAuth credential persistence failed"
 
 
+class OAuthCredentialUnavailableError(AppError):
+    status_code = 409
+    detail = "OAuth credential is unavailable"
+
+
+class OAuthCredentialRefreshUnavailableError(AppError):
+    status_code = 409
+    detail = "OAuth credential must be reconnected"
+
+
+class OAuthCredentialRefreshFailedError(AppError):
+    status_code = 502
+    detail = "OAuth credential refresh failed"
+
+
 class ProviderError(AppError):
     status_code = 502
     detail = "External provider error"

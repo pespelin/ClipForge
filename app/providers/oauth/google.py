@@ -2,7 +2,40 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.providers.oauth.base import OAuthTokenExchangeError, OAuthTokenResult
+from app.providers.oauth.base import (
+    OAuthTokenExchangeError,
+    OAuthTokenRefreshError,
+    OAuthTokenResult,
+)
+
+_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+
+
+def _parse_token_result(payload: object) -> OAuthTokenResult:
+    if not isinstance(payload, dict) or payload.get("error") is not None:
+        raise ValueError
+
+    access_token = payload.get("access_token")
+    refresh_token = payload.get("refresh_token")
+    token_type = payload.get("token_type")
+    scope = payload.get("scope")
+    expires_in = payload.get("expires_in")
+    if not isinstance(access_token, str) or not access_token:
+        raise ValueError
+    for optional_text in (refresh_token, token_type, scope):
+        if optional_text is not None and (not isinstance(optional_text, str) or not optional_text):
+            raise ValueError
+    if expires_in is not None and (
+        not isinstance(expires_in, int) or isinstance(expires_in, bool) or expires_in <= 0
+    ):
+        raise ValueError
+    return OAuthTokenResult(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type=token_type,
+        scope=scope,
+        expires_in=expires_in,
+    )
 
 
 class GoogleOAuthAuthorizationProvider:
@@ -37,8 +70,6 @@ class GoogleOAuthAuthorizationProvider:
 class GoogleOAuthTokenExchangeProvider:
     """Async Google authorization-code token exchange adapter."""
 
-    _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
-
     def __init__(
         self,
         client: httpx.AsyncClient,
@@ -57,7 +88,7 @@ class GoogleOAuthTokenExchangeProvider:
     ) -> OAuthTokenResult:
         try:
             response = await self._client.post(
-                self._TOKEN_ENDPOINT,
+                _TOKEN_ENDPOINT,
                 data={
                     "client_id": self._client_id,
                     "client_secret": self._client_secret,
@@ -74,35 +105,42 @@ class GoogleOAuthTokenExchangeProvider:
             raise OAuthTokenExchangeError
         try:
             payload = response.json()
-            return self._parse_token_result(payload)
+            return _parse_token_result(payload)
         except (TypeError, ValueError):
             raise OAuthTokenExchangeError from None
 
-    @staticmethod
-    def _parse_token_result(payload: object) -> OAuthTokenResult:
-        if not isinstance(payload, dict) or payload.get("error") is not None:
-            raise ValueError
 
-        access_token = payload.get("access_token")
-        refresh_token = payload.get("refresh_token")
-        token_type = payload.get("token_type")
-        scope = payload.get("scope")
-        expires_in = payload.get("expires_in")
-        if not isinstance(access_token, str) or not access_token:
-            raise ValueError
-        for optional_text in (refresh_token, token_type, scope):
-            if optional_text is not None and (
-                not isinstance(optional_text, str) or not optional_text
-            ):
-                raise ValueError
-        if expires_in is not None and (
-            not isinstance(expires_in, int) or isinstance(expires_in, bool) or expires_in <= 0
-        ):
-            raise ValueError
-        return OAuthTokenResult(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            token_type=token_type,
-            scope=scope,
-            expires_in=expires_in,
-        )
+class GoogleOAuthTokenRefreshProvider:
+    """Async Google refresh-token grant adapter."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        client_id: str,
+        client_secret: str,
+    ) -> None:
+        self._client = client
+        self._client_id = client_id
+        self._client_secret = client_secret
+
+    async def refresh_token(self, *, refresh_token: str) -> OAuthTokenResult:
+        try:
+            response = await self._client.post(
+                _TOKEN_ENDPOINT,
+                data={
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            )
+        except (httpx.TimeoutException, httpx.RequestError):
+            raise OAuthTokenRefreshError from None
+
+        if not response.is_success:
+            raise OAuthTokenRefreshError
+        try:
+            return _parse_token_result(response.json())
+        except (TypeError, ValueError):
+            raise OAuthTokenRefreshError from None
