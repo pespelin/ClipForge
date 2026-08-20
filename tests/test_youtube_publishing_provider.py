@@ -231,11 +231,9 @@ async def test_existing_session_probes_and_resumes_from_reported_offset_without_
     provider, client, _, _ = make_provider(handler)
     session = YouTubeResumableUploadSession(SESSION_URI, 10)
     async with client:
-        progress = await provider.resume_upload(publishing_input(), session)
+        result = await provider.resume_upload(publishing_input(), session)
     assert [request.method for request in requests] == ["PUT", "PUT"]
-    assert progress.completed is True
-    assert progress.next_byte_offset == 10
-    assert progress.publishing_result.remote_media_id == VIDEO_ID
+    assert result.remote_media_id == VIDEO_ID
 
 
 async def test_existing_session_already_complete_does_not_upload_again() -> None:
@@ -248,12 +246,11 @@ async def test_existing_session_already_complete_does_not_upload_again() -> None
 
     provider, client, _, _ = make_provider(handler)
     async with client:
-        progress = await provider.resume_upload(
+        result = await provider.resume_upload(
             publishing_input(), YouTubeResumableUploadSession(SESSION_URI, 10)
         )
     assert len(requests) == 1
-    assert progress.completed is True
-    assert progress.publishing_result.remote_media_id == VIDEO_ID
+    assert result.remote_media_id == VIDEO_ID
 
 
 async def test_status_probe_308_without_range_resumes_from_zero() -> None:
@@ -269,10 +266,10 @@ async def test_status_probe_308_without_range_resumes_from_zero() -> None:
 
     provider, client, _, _ = make_provider(handler)
     async with client:
-        progress = await provider.resume_upload(
+        result = await provider.resume_upload(
             publishing_input(), YouTubeResumableUploadSession(SESSION_URI, 10)
         )
-    assert progress.completed is True
+    assert result.remote_media_id == VIDEO_ID
 
 
 @pytest.mark.parametrize(

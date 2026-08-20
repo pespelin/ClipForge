@@ -56,10 +56,13 @@ async def test_task_composes_dependencies_and_returns_result(monkeypatch) -> Non
         def __init__(self, **values) -> None:
             dependencies.update(values)
 
-        async def process_publish_job(self, publish_job_id: int):
+        async def prepare_publish_job_execution(self, publish_job_id: int):
             dependencies["publish_job_id"] = publish_job_id
+            return SimpleNamespace(requires_checkpoint_commit=False)
+
+        async def execute_prepared_publish(self, plan):
             return SimpleNamespace(
-                id=publish_job_id,
+                id=dependencies["publish_job_id"],
                 status=PublishStatus.PUBLISHED,
                 remote_media_id="local-youtube-abc",
             )
@@ -90,6 +93,138 @@ async def test_task_composes_dependencies_and_returns_result(monkeypatch) -> Non
     assert session.closed
 
 
+async def test_resumable_checkpoint_commit_precedes_execute_and_final_commit(
+    monkeypatch,
+) -> None:
+    events = []
+
+    class OrderedSession(FakeSession):
+        async def commit(self) -> None:
+            events.append("commit")
+            await super().commit()
+
+    class FakeService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare")
+            return SimpleNamespace(requires_checkpoint_commit=True)
+
+        async def execute_prepared_publish(self, plan):
+            events.append("execute")
+            return SimpleNamespace(
+                id=7,
+                status=PublishStatus.PUBLISHED,
+                remote_media_id="youtube-123",
+            )
+
+    session = OrderedSession()
+    patch_dependencies(monkeypatch, session, FakeService)
+
+    await task_module._run_publishing(7)
+
+    assert events == ["prepare", "commit", "execute", "commit"]
+    assert session.commits == 2
+
+
+async def test_checkpoint_commit_failure_prevents_media_execution(monkeypatch) -> None:
+    events = []
+
+    class FailingCheckpointSession(FakeSession):
+        async def commit(self) -> None:
+            events.append("commit")
+            raise OperationalError("COMMIT", {}, RuntimeError("database unavailable"))
+
+    class FakeService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare")
+            return SimpleNamespace(requires_checkpoint_commit=True)
+
+        async def execute_prepared_publish(self, plan):
+            events.append("execute")
+            raise AssertionError("media transfer must not start")
+
+    session = FailingCheckpointSession()
+    patch_dependencies(monkeypatch, session, FakeService)
+
+    with pytest.raises(OperationalError):
+        await task_module._run_publishing(7)
+
+    assert events == ["prepare", "commit"]
+    assert session.rollbacks == 1
+
+
+async def test_final_commit_failure_rolls_back_after_remote_completion(monkeypatch) -> None:
+    events = []
+
+    class FailingFinalSession(FakeSession):
+        async def commit(self) -> None:
+            self.commits += 1
+            events.append(f"commit-{self.commits}")
+            if self.commits == 2:
+                raise OperationalError("COMMIT", {}, RuntimeError("database unavailable"))
+
+    class FakeService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare")
+            return SimpleNamespace(requires_checkpoint_commit=True)
+
+        async def execute_prepared_publish(self, plan):
+            events.append("execute")
+            return SimpleNamespace(
+                id=7,
+                status=PublishStatus.PUBLISHED,
+                remote_media_id="youtube-123",
+            )
+
+    session = FailingFinalSession()
+    patch_dependencies(monkeypatch, session, FakeService)
+
+    with pytest.raises(OperationalError):
+        await task_module._run_publishing(7)
+
+    assert events == ["prepare", "commit-1", "execute", "commit-2"]
+    assert session.rollbacks == 1
+
+
+async def test_provider_failure_after_checkpoint_commits_failed_state(monkeypatch) -> None:
+    events = []
+
+    class OrderedSession(FakeSession):
+        async def commit(self) -> None:
+            events.append("commit")
+            await super().commit()
+
+    class FakeService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare")
+            return SimpleNamespace(requires_checkpoint_commit=True)
+
+        async def execute_prepared_publish(self, plan):
+            events.append("execute")
+            raise PublishingError
+
+    session = OrderedSession()
+    patch_dependencies(monkeypatch, session, FakeService)
+
+    with pytest.raises(PublishingError):
+        await task_module._run_publishing(7)
+
+    assert events == ["prepare", "commit", "execute", "commit"]
+    assert session.commits == 2
+    assert session.rollbacks == 0
+
+
 def test_sync_entrypoint_runs_async_helper_and_is_registered(monkeypatch) -> None:
     async def fake_run(publish_job_id: int) -> dict[str, int | str | None]:
         return {
@@ -113,7 +248,7 @@ async def test_publishing_error_commits_failed_state_and_reraises(monkeypatch) -
         def __init__(self, **dependencies) -> None:
             pass
 
-        async def process_publish_job(self, publish_job_id: int):
+        async def prepare_publish_job_execution(self, publish_job_id: int):
             raise PublishingError
 
     patch_dependencies(monkeypatch, session, FailingService)
@@ -134,7 +269,7 @@ async def test_precondition_errors_roll_back_and_reraise(monkeypatch, error) -> 
         def __init__(self, **dependencies) -> None:
             pass
 
-        async def process_publish_job(self, publish_job_id: int):
+        async def prepare_publish_job_execution(self, publish_job_id: int):
             raise error
 
     patch_dependencies(monkeypatch, session, FailingService)
@@ -324,7 +459,8 @@ def test_operational_error_uses_bounded_celery_retry(monkeypatch) -> None:
 def test_task_contains_only_composition_and_transaction_boundary() -> None:
     source = inspect.getsource(task_module._run_publishing)
 
-    assert "process_publish_job" in source
+    assert "prepare_publish_job_execution" in source
+    assert "execute_prepared_publish" in source
     assert "hashlib" not in source
     assert "scheduled_publish_at" not in source
     assert "source_storage_key" not in source

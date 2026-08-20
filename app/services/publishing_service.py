@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,7 +17,11 @@ from app.core.exceptions import (
 )
 from app.models.publish_job import PublishJob, PublishStatus
 from app.models.video_render import VideoRender, VideoRenderStatus
-from app.providers.publishing import PublishingProvider
+from app.providers.publishing import (
+    PublishingProvider,
+    ResumablePublishingProvider,
+    ResumablePublishingSession,
+)
 from app.repositories.publish_job_repository import PublishJobRepository
 from app.repositories.video_render_repository import VideoRenderRepository
 from app.schemas.publish_job import (
@@ -26,6 +31,19 @@ from app.schemas.publish_job import (
     PublishOptions,
     PublishRequest,
 )
+from app.services.publishing_upload_session_service import (
+    PublishingUploadSessionData,
+    PublishingUploadSessionService,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PublishingExecutionPlan:
+    publish_job: PublishJob
+    publishing_input: PublishingInput | None
+    resumable_session: ResumablePublishingSession | None
+    requires_checkpoint_commit: bool
+    already_complete: bool = False
 
 
 class PublishingService:
@@ -34,10 +52,12 @@ class PublishingService:
         video_render_repository: VideoRenderRepository,
         publish_job_repository: PublishJobRepository,
         publishing_provider: PublishingProvider,
+        upload_session_service: PublishingUploadSessionService | None = None,
     ) -> None:
         self.video_render_repository = video_render_repository
         self.publish_job_repository = publish_job_repository
         self.publishing_provider = publishing_provider
+        self.upload_session_service = upload_session_service
 
     async def create_publish_job(self, video_render_id: int, request: PublishRequest) -> PublishJob:
         validated_request = PublishRequest.model_validate(request)
@@ -100,9 +120,15 @@ class PublishingService:
         await self.publish_job_repository.save(publish_job)
 
     async def process_publish_job(self, publish_job_id: int) -> PublishJob:
+        plan = await self.prepare_publish_job_execution(publish_job_id)
+        if plan.requires_checkpoint_commit:
+            raise RuntimeError("Resumable publishing requires an explicit checkpoint commit")
+        return await self.execute_prepared_publish(plan)
+
+    async def prepare_publish_job_execution(self, publish_job_id: int) -> PublishingExecutionPlan:
         publish_job = await self.get_publish_job(publish_job_id)
         if publish_job.status == PublishStatus.PUBLISHED:
-            return publish_job
+            return PublishingExecutionPlan(publish_job, None, None, False, True)
         if publish_job.status == PublishStatus.CANCELLED:
             raise PublishJobCancelledError
         self._verify_due(publish_job)
@@ -114,19 +140,74 @@ class PublishingService:
 
         try:
             publishing_input = self._build_publishing_input(publish_job)
-            raw_result = await self.publishing_provider.publish(publishing_input)
+            if not isinstance(self.publishing_provider, ResumablePublishingProvider):
+                return PublishingExecutionPlan(publish_job, publishing_input, None, False)
+            if self.upload_session_service is None:
+                raise RuntimeError("Resumable upload persistence is not composed")
+            persisted = await self.upload_session_service.get_by_publish_job_id(publish_job.id)
+            if persisted is not None:
+                if persisted.platform != publish_job.platform:
+                    raise ValueError("Persisted upload session platform mismatch")
+                return PublishingExecutionPlan(
+                    publish_job,
+                    publishing_input,
+                    ResumablePublishingSession(
+                        session_uri=persisted.session_uri,
+                        total_bytes=persisted.total_bytes,
+                        next_byte_offset=persisted.next_byte_offset,
+                    ),
+                    False,
+                )
+
+            session = await self.publishing_provider.initiate_upload(publishing_input)
+            await self.upload_session_service.store(
+                PublishingUploadSessionData(
+                    publish_job_id=publish_job.id,
+                    platform=publish_job.platform,
+                    session_uri=session.session_uri,
+                    total_bytes=session.total_bytes,
+                    next_byte_offset=session.next_byte_offset,
+                )
+            )
+            return PublishingExecutionPlan(publish_job, publishing_input, session, True)
+        except Exception as error:
+            await self._mark_failed(publish_job, error)
+            raise PublishingError from error
+
+    async def execute_prepared_publish(self, plan: PublishingExecutionPlan) -> PublishJob:
+        if plan.already_complete:
+            return plan.publish_job
+        publish_job = plan.publish_job
+        if plan.publishing_input is None:
+            raise PublishingError
+        try:
+            if plan.resumable_session is None:
+                raw_result = await self.publishing_provider.publish(plan.publishing_input)
+            else:
+                if not isinstance(self.publishing_provider, ResumablePublishingProvider):
+                    raise RuntimeError("Prepared resumable provider capability is unavailable")
+                raw_result = await self.publishing_provider.resume_upload(
+                    plan.publishing_input, plan.resumable_session
+                )
             result = PublishingResult.model_validate(raw_result)
             self._apply_result(publish_job, result)
             publish_job.status = PublishStatus.PUBLISHED
             publish_job.completed_at = datetime.now(UTC)
             publish_job.error_message = None
+            if plan.resumable_session is not None:
+                if self.upload_session_service is None:
+                    raise RuntimeError("Resumable upload persistence is not composed")
+                await self.upload_session_service.delete_by_publish_job_id(publish_job.id)
             return await self.publish_job_repository.save(publish_job)
         except Exception as error:
-            publish_job.status = PublishStatus.FAILED
-            publish_job.completed_at = None
-            publish_job.error_message = self._error_message(error)
-            await self.publish_job_repository.save(publish_job)
+            await self._mark_failed(publish_job, error)
             raise PublishingError from error
+
+    async def _mark_failed(self, publish_job: PublishJob, error: Exception) -> None:
+        publish_job.status = PublishStatus.FAILED
+        publish_job.completed_at = None
+        publish_job.error_message = self._error_message(error)
+        await self.publish_job_repository.save(publish_job)
 
     async def get_publish_job(self, publish_job_id: int) -> PublishJob:
         publish_job = await self.publish_job_repository.get(publish_job_id)

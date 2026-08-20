@@ -1,13 +1,14 @@
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlencode
 
 import httpx
 
 from app.models.publish_job import PublishPlatform, PublishVisibility
+from app.providers.publishing.base import ResumablePublishingSession
 from app.providers.publishing.dependencies import (
     PublishingArtifactReader,
     PublishingCredentialResolver,
@@ -22,13 +23,7 @@ class YouTubePublishingError(Exception):
         super().__init__("YouTube publishing failed")
 
 
-@dataclass(frozen=True)
-class YouTubeResumableUploadSession:
-    """Internal state required to continue a YouTube resumable upload."""
-
-    session_uri: str = field(repr=False)
-    total_bytes: int
-    next_byte_offset: int = 0
+YouTubeResumableUploadSession = ResumablePublishingSession
 
 
 @dataclass(frozen=True)
@@ -82,11 +77,21 @@ class YouTubePublishingProvider:
             raise YouTubePublishingError
         return progress.publishing_result
 
+    async def initiate_upload(
+        self, publishing_input: PublishingInput
+    ) -> ResumablePublishingSession:
+        credential, video_bytes = await self._resolve_dependencies(publishing_input)
+        return await self._initiate_session(
+            publishing_input,
+            video_bytes,
+            credential.access_token,
+        )
+
     async def resume_upload(
         self,
         publishing_input: PublishingInput,
-        session: YouTubeResumableUploadSession,
-    ) -> YouTubeResumableUploadProgress:
+        session: ResumablePublishingSession,
+    ) -> PublishingResult:
         """Probe and continue an existing session without initiating another one."""
         credential, video_bytes = await self._resolve_dependencies(publishing_input)
         self._validate_session(session, len(video_bytes))
@@ -96,18 +101,23 @@ class YouTubePublishingProvider:
             publishing_input.visibility,
         )
         if progress.completed:
-            return progress
-        resumed_session = YouTubeResumableUploadSession(
+            if progress.publishing_result is None:
+                raise YouTubePublishingError
+            return progress.publishing_result
+        resumed_session = ResumablePublishingSession(
             session_uri=session.session_uri,
             total_bytes=session.total_bytes,
             next_byte_offset=progress.next_byte_offset,
         )
-        return await self._upload_media(
+        progress = await self._upload_media(
             resumed_session,
             video_bytes,
             credential.access_token,
             publishing_input.visibility,
         )
+        if not progress.completed or progress.publishing_result is None:
+            raise YouTubePublishingError
+        return progress.publishing_result
 
     async def _resolve_dependencies(self, publishing_input: PublishingInput):
         if publishing_input.platform != PublishPlatform.YOUTUBE:
@@ -133,7 +143,7 @@ class YouTubePublishingProvider:
         publishing_input: PublishingInput,
         video_bytes: bytes,
         access_token: str,
-    ) -> YouTubeResumableUploadSession:
+    ) -> ResumablePublishingSession:
         query = urlencode(
             {
                 "part": "snippet,status",
@@ -162,14 +172,14 @@ class YouTubePublishingProvider:
         session_uri = response.headers.get("Location")
         if not session_uri or not session_uri.strip():
             raise YouTubePublishingError
-        return YouTubeResumableUploadSession(
+        return ResumablePublishingSession(
             session_uri=session_uri,
             total_bytes=len(video_bytes),
         )
 
     async def _query_status(
         self,
-        session: YouTubeResumableUploadSession,
+        session: ResumablePublishingSession,
         access_token: str,
         visibility: PublishVisibility,
     ) -> YouTubeResumableUploadProgress:
@@ -187,7 +197,7 @@ class YouTubePublishingProvider:
 
     async def _upload_media(
         self,
-        session: YouTubeResumableUploadSession,
+        session: ResumablePublishingSession,
         video_bytes: bytes,
         access_token: str,
         visibility: PublishVisibility,
@@ -243,7 +253,7 @@ class YouTubePublishingProvider:
 
     @staticmethod
     def _validate_session(
-        session: YouTubeResumableUploadSession,
+        session: ResumablePublishingSession,
         artifact_size: int,
     ) -> None:
         if (

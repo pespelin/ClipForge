@@ -1,4 +1,8 @@
-from app.providers.publishing.base import PublishingProvider
+from app.providers.publishing.base import (
+    PublishingProvider,
+    ResumablePublishingProvider,
+    ResumablePublishingSession,
+)
 from app.providers.publishing.dependencies import (
     PublishingAccessCredential,
     PublishingArtifactReader,
@@ -23,6 +27,8 @@ __all__ = [
     "PublishingArtifactReader",
     "PublishingCredentialResolver",
     "PublishingProvider",
+    "ResumablePublishingProvider",
+    "ResumablePublishingSession",
     "UnsupportedPublishingPlatformError",
     "UnusablePublishingInputError",
     "YouTubePublishingError",

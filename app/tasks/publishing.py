@@ -19,7 +19,10 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
             publishing_provider=create_publishing_provider(),
         )
         try:
-            publish_job = await service.process_publish_job(publish_job_id)
+            plan = await service.prepare_publish_job_execution(publish_job_id)
+            if plan.requires_checkpoint_commit:
+                await session.commit()
+            publish_job = await service.execute_prepared_publish(plan)
             await session.commit()
         except PublishingError:
             await session.commit()
