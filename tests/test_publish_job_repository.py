@@ -36,6 +36,23 @@ async def test_get_returns_job(session: AsyncMock, publish_job: PublishJob) -> N
     session.execute.assert_awaited_once()
 
 
+async def test_get_for_update_locks_matching_job_without_transaction_ownership(
+    session: AsyncMock, publish_job: PublishJob
+) -> None:
+    query_result = Mock()
+    query_result.scalar_one_or_none.return_value = publish_job
+    session.execute.return_value = query_result
+
+    result = await PublishJobRepository(session).get_for_update(1)
+
+    statement = str(session.execute.await_args.args[0])
+    assert "publish_jobs.id" in statement
+    assert "FOR UPDATE" in statement
+    assert result is publish_job
+    session.commit.assert_not_awaited()
+    session.rollback.assert_not_awaited()
+
+
 async def test_list_by_render_is_newest_first(session: AsyncMock, publish_job: PublishJob) -> None:
     scalars = Mock()
     scalars.all.return_value = [publish_job]

@@ -44,12 +44,18 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
         )
         try:
             plan = await service.prepare_publish_job_execution(publish_job_id)
-            if plan.requires_checkpoint_commit:
+            if plan.requires_pre_execution_commit:
                 await session.commit()
-                logger.info(
-                    "publishing.execution.checkpoint_created publish_job_id=%s",
-                    publish_job_id,
-                )
+                if getattr(plan, "checkpoint_created", False):
+                    logger.info(
+                        "publishing.execution.checkpoint_created publish_job_id=%s",
+                        publish_job_id,
+                    )
+                else:
+                    logger.info(
+                        "publishing.execution.resumed publish_job_id=%s",
+                        publish_job_id,
+                    )
             elif getattr(plan, "resumable_session", None) is not None:
                 logger.info(
                     "publishing.execution.resumed publish_job_id=%s",

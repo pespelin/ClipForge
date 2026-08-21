@@ -42,7 +42,8 @@ class PublishingExecutionPlan:
     publish_job: PublishJob
     publishing_input: PublishingInput | None
     resumable_session: ResumablePublishingSession | None
-    requires_checkpoint_commit: bool
+    requires_pre_execution_commit: bool
+    checkpoint_created: bool = False
     already_complete: bool = False
 
 
@@ -121,14 +122,24 @@ class PublishingService:
 
     async def process_publish_job(self, publish_job_id: int) -> PublishJob:
         plan = await self.prepare_publish_job_execution(publish_job_id)
-        if plan.requires_checkpoint_commit:
-            raise RuntimeError("Resumable publishing requires an explicit checkpoint commit")
+        if plan.requires_pre_execution_commit:
+            raise RuntimeError("Resumable publishing requires an explicit pre-execution commit")
         return await self.execute_prepared_publish(plan)
 
     async def prepare_publish_job_execution(self, publish_job_id: int) -> PublishingExecutionPlan:
-        publish_job = await self.get_publish_job(publish_job_id)
+        resumable_provider = isinstance(self.publishing_provider, ResumablePublishingProvider)
+        publish_job = await self._get_publish_job_for_execution(
+            publish_job_id,
+            lock_for_update=resumable_provider,
+        )
         if publish_job.status == PublishStatus.PUBLISHED:
-            return PublishingExecutionPlan(publish_job, None, None, False, True)
+            return PublishingExecutionPlan(
+                publish_job=publish_job,
+                publishing_input=None,
+                resumable_session=None,
+                requires_pre_execution_commit=False,
+                already_complete=True,
+            )
         if publish_job.status == PublishStatus.CANCELLED:
             raise PublishJobCancelledError
         self._verify_due(publish_job)
@@ -140,8 +151,13 @@ class PublishingService:
 
         try:
             publishing_input = self._build_publishing_input(publish_job)
-            if not isinstance(self.publishing_provider, ResumablePublishingProvider):
-                return PublishingExecutionPlan(publish_job, publishing_input, None, False)
+            if not resumable_provider:
+                return PublishingExecutionPlan(
+                    publish_job=publish_job,
+                    publishing_input=publishing_input,
+                    resumable_session=None,
+                    requires_pre_execution_commit=False,
+                )
             if self.upload_session_service is None:
                 raise RuntimeError("Resumable upload persistence is not composed")
             persisted = await self.upload_session_service.get_by_publish_job_id(publish_job.id)
@@ -149,14 +165,14 @@ class PublishingService:
                 if persisted.platform != publish_job.platform:
                     raise ValueError("Persisted upload session platform mismatch")
                 return PublishingExecutionPlan(
-                    publish_job,
-                    publishing_input,
-                    ResumablePublishingSession(
+                    publish_job=publish_job,
+                    publishing_input=publishing_input,
+                    resumable_session=ResumablePublishingSession(
                         session_uri=persisted.session_uri,
                         total_bytes=persisted.total_bytes,
                         next_byte_offset=persisted.next_byte_offset,
                     ),
-                    False,
+                    requires_pre_execution_commit=True,
                 )
 
             session = await self.publishing_provider.initiate_upload(publishing_input)
@@ -169,7 +185,13 @@ class PublishingService:
                     next_byte_offset=session.next_byte_offset,
                 )
             )
-            return PublishingExecutionPlan(publish_job, publishing_input, session, True)
+            return PublishingExecutionPlan(
+                publish_job=publish_job,
+                publishing_input=publishing_input,
+                resumable_session=session,
+                requires_pre_execution_commit=True,
+                checkpoint_created=True,
+            )
         except Exception as error:
             await self._mark_failed(publish_job, error)
             if isinstance(error, PublishingError):
@@ -215,6 +237,21 @@ class PublishingService:
 
     async def get_publish_job(self, publish_job_id: int) -> PublishJob:
         publish_job = await self.publish_job_repository.get(publish_job_id)
+        if publish_job is None:
+            raise PublishJobNotFoundError
+        return publish_job
+
+    async def _get_publish_job_for_execution(
+        self,
+        publish_job_id: int,
+        *,
+        lock_for_update: bool,
+    ) -> PublishJob:
+        publish_job = (
+            await self.publish_job_repository.get_for_update(publish_job_id)
+            if lock_for_update
+            else await self.publish_job_repository.get(publish_job_id)
+        )
         if publish_job is None:
             raise PublishJobNotFoundError
         return publish_job

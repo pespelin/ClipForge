@@ -13,11 +13,20 @@ SESSION_URI = "https://upload.youtube.test/secret-session-capability"
 
 
 class FakeRepository:
-    def __init__(self, row=None) -> None:
+    def __init__(self, row=None, events=None) -> None:
         self.row = row
         self.saved_statuses = []
+        self.normal_gets = []
+        self.locked_gets = []
+        self.events = events if events is not None else []
 
     async def get(self, row_id: int):
+        self.normal_gets.append(row_id)
+        return self.row if self.row and self.row.id == row_id else None
+
+    async def get_for_update(self, row_id: int):
+        self.events.append("lock")
+        self.locked_gets.append(row_id)
         return self.row if self.row and self.row.id == row_id else None
 
     async def save(self, row):
@@ -27,17 +36,27 @@ class FakeRepository:
 
 
 class FakeUploadSessionService:
-    def __init__(self, checkpoint: PublishingUploadSessionData | None = None) -> None:
+    def __init__(
+        self,
+        checkpoint: PublishingUploadSessionData | None = None,
+        events=None,
+    ) -> None:
         self.checkpoint = checkpoint
         self.stored = []
         self.deleted = []
+        self.events = events if events is not None else []
+        self.store_error: Exception | None = None
 
     async def get_by_publish_job_id(self, publish_job_id: int):
+        self.events.append("checkpoint_lookup")
         if self.checkpoint and self.checkpoint.publish_job_id == publish_job_id:
             return self.checkpoint
         return None
 
     async def store(self, checkpoint: PublishingUploadSessionData):
+        self.events.append("checkpoint_store")
+        if self.store_error is not None:
+            raise self.store_error
         self.checkpoint = checkpoint
         self.stored.append(checkpoint)
         return object()
@@ -49,16 +68,21 @@ class FakeUploadSessionService:
 
 
 class FakeResumableProvider:
-    def __init__(self) -> None:
+    def __init__(self, events=None) -> None:
         self.initiated = []
         self.resumed = []
         self.error: Exception | None = None
+        self.initiation_error: Exception | None = None
+        self.events = events if events is not None else []
 
     async def publish(self, publishing_input: PublishingInput):
         raise AssertionError("generic publish must not run for resumable capability")
 
     async def initiate_upload(self, publishing_input: PublishingInput):
+        self.events.append("initiate")
         self.initiated.append(publishing_input)
+        if self.initiation_error is not None:
+            raise self.initiation_error
         return ResumablePublishingSession(SESSION_URI, 4096)
 
     async def resume_upload(
@@ -111,19 +135,29 @@ def publish_job(status=PublishStatus.PENDING) -> PublishJob:
 
 
 def make_service(job=None, checkpoint=None):
-    repository = FakeRepository(job or publish_job())
-    provider = FakeResumableProvider()
-    sessions = FakeUploadSessionService(checkpoint)
+    events = []
+    repository = FakeRepository(job or publish_job(), events)
+    provider = FakeResumableProvider(events)
+    sessions = FakeUploadSessionService(checkpoint, events)
     service = PublishingService(object(), repository, provider, sessions)
     return service, repository, provider, sessions
 
 
 async def test_new_session_prepare_stores_checkpoint_without_media_transfer() -> None:
-    service, _, provider, sessions = make_service()
+    service, repository, provider, sessions = make_service()
 
     plan = await service.prepare_publish_job_execution(7)
 
-    assert plan.requires_checkpoint_commit is True
+    assert plan.requires_pre_execution_commit is True
+    assert plan.checkpoint_created is True
+    assert repository.locked_gets == [7]
+    assert repository.normal_gets == []
+    assert repository.events[:4] == [
+        "lock",
+        "checkpoint_lookup",
+        "initiate",
+        "checkpoint_store",
+    ]
     assert len(provider.initiated) == 1
     assert provider.resumed == []
     assert len(sessions.stored) == 1
@@ -142,14 +176,46 @@ async def test_existing_checkpoint_is_reused_without_new_initiation() -> None:
         total_bytes=4096,
         next_byte_offset=1024,
     )
-    service, _, provider, sessions = make_service(checkpoint=checkpoint)
+    service, repository, provider, sessions = make_service(checkpoint=checkpoint)
 
     plan = await service.prepare_publish_job_execution(7)
 
-    assert plan.requires_checkpoint_commit is False
+    assert plan.requires_pre_execution_commit is True
+    assert plan.checkpoint_created is False
+    assert repository.locked_gets == [7]
+    assert repository.normal_gets == []
+    assert repository.events[:2] == ["lock", "checkpoint_lookup"]
     assert provider.initiated == []
     assert sessions.stored == []
     assert plan.resumable_session.next_byte_offset == 1024
+
+
+async def test_initiation_failure_does_not_store_checkpoint_or_transfer_media() -> None:
+    service, repository, provider, sessions = make_service()
+    provider.initiation_error = RuntimeError("initiation failed")
+
+    with pytest.raises(PublishingError):
+        await service.prepare_publish_job_execution(7)
+
+    assert repository.events == ["lock", "checkpoint_lookup", "initiate"]
+    assert sessions.stored == []
+    assert provider.resumed == []
+
+
+async def test_checkpoint_flush_failure_does_not_transfer_media() -> None:
+    service, repository, provider, sessions = make_service()
+    sessions.store_error = RuntimeError("checkpoint flush failed")
+
+    with pytest.raises(PublishingError):
+        await service.prepare_publish_job_execution(7)
+
+    assert repository.events == [
+        "lock",
+        "checkpoint_lookup",
+        "initiate",
+        "checkpoint_store",
+    ]
+    assert provider.resumed == []
 
 
 async def test_execute_resumes_applies_result_and_cleans_checkpoint() -> None:
@@ -212,7 +278,7 @@ async def test_retry_uses_durable_checkpoint_and_never_reinitiates() -> None:
 
     assert len(provider.initiated) == 1
     assert len(provider.resumed) == 2
-    assert second_plan.requires_checkpoint_commit is False
+    assert second_plan.requires_pre_execution_commit is True
     assert result.status is PublishStatus.PUBLISHED
     assert sessions.checkpoint is None
 

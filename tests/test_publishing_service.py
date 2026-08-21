@@ -24,6 +24,7 @@ class FakeRepository:
         self.rows = {row.id: row for row in rows or []}
         self.created = []
         self.saved_statuses = []
+        self.locked_gets = []
 
     async def create(self, row):
         row.id = max(self.rows, default=0) + 1
@@ -32,6 +33,10 @@ class FakeRepository:
         return row
 
     async def get(self, row_id: int):
+        return self.rows.get(row_id)
+
+    async def get_for_update(self, row_id: int):
+        self.locked_gets.append(row_id)
         return self.rows.get(row_id)
 
     async def get_by_video_render_id(self, video_render_id: int):
@@ -213,6 +218,7 @@ async def test_process_maps_result_and_crosses_provider_boundary_with_schema_onl
 
     result = await service.process_publish_job(1)
 
+    assert jobs.locked_gets == []
     assert jobs.saved_statuses == [PublishStatus.PUBLISHING, PublishStatus.PUBLISHED]
     assert result.status == PublishStatus.PUBLISHED
     assert result.remote_media_id == "youtube-123"

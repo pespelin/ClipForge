@@ -68,7 +68,7 @@ async def test_task_composes_dependencies_and_returns_result(monkeypatch) -> Non
 
         async def prepare_publish_job_execution(self, publish_job_id: int):
             dependencies["publish_job_id"] = publish_job_id
-            return SimpleNamespace(requires_checkpoint_commit=False)
+            return SimpleNamespace(requires_pre_execution_commit=False)
 
         async def execute_prepared_publish(self, plan):
             return SimpleNamespace(
@@ -128,7 +128,7 @@ async def test_youtube_task_composes_managed_http_and_checkpoint_dependencies(
             captured.update(dependencies)
 
         async def prepare_publish_job_execution(self, publish_job_id):
-            return SimpleNamespace(requires_checkpoint_commit=False)
+            return SimpleNamespace(requires_pre_execution_commit=False)
 
         async def execute_prepared_publish(self, plan):
             return SimpleNamespace(
@@ -183,7 +183,10 @@ async def test_resumable_checkpoint_commit_precedes_execute_and_final_commit(
 
         async def prepare_publish_job_execution(self, publish_job_id: int):
             events.append("prepare")
-            return SimpleNamespace(requires_checkpoint_commit=True)
+            return SimpleNamespace(
+                requires_pre_execution_commit=True,
+                checkpoint_created=True,
+            )
 
         async def execute_prepared_publish(self, plan):
             events.append("execute")
@@ -217,7 +220,7 @@ async def test_checkpoint_commit_failure_prevents_media_execution(monkeypatch) -
 
         async def prepare_publish_job_execution(self, publish_job_id: int):
             events.append("prepare")
-            return SimpleNamespace(requires_checkpoint_commit=True)
+            return SimpleNamespace(requires_pre_execution_commit=True)
 
         async def execute_prepared_publish(self, plan):
             events.append("execute")
@@ -249,7 +252,7 @@ async def test_final_commit_failure_rolls_back_after_remote_completion(monkeypat
 
         async def prepare_publish_job_execution(self, publish_job_id: int):
             events.append("prepare")
-            return SimpleNamespace(requires_checkpoint_commit=True)
+            return SimpleNamespace(requires_pre_execution_commit=True)
 
         async def execute_prepared_publish(self, plan):
             events.append("execute")
@@ -283,7 +286,7 @@ async def test_provider_failure_after_checkpoint_commits_failed_state(monkeypatc
 
         async def prepare_publish_job_execution(self, publish_job_id: int):
             events.append("prepare")
-            return SimpleNamespace(requires_checkpoint_commit=True)
+            return SimpleNamespace(requires_pre_execution_commit=True)
 
         async def execute_prepared_publish(self, plan):
             events.append("execute")
@@ -598,22 +601,33 @@ def test_non_retryable_publishing_errors_do_not_auto_retry(
     assert f"failure_category={expected_category}" in caplog.text
 
 
-def test_resumed_checkpoint_event_does_not_leak_session_or_storage(monkeypatch, caplog) -> None:
+async def test_existing_checkpoint_commits_before_resume_without_leaking_secrets(
+    monkeypatch, caplog
+) -> None:
     session_secret = "SESSION_SECRET_URI_15C"
     storage_secret = "STORAGE_SECRET_15C"
     caplog.set_level(logging.INFO, logger="app.tasks.publishing")
+    events = []
+
+    class OrderedSession(FakeSession):
+        async def commit(self) -> None:
+            events.append("commit")
+            await super().commit()
 
     class FakeService:
         def __init__(self, **dependencies) -> None:
             pass
 
         async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare_existing_checkpoint")
             return SimpleNamespace(
-                requires_checkpoint_commit=False,
+                requires_pre_execution_commit=True,
+                checkpoint_created=False,
                 resumable_session=SimpleNamespace(session_uri=session_secret),
             )
 
         async def execute_prepared_publish(self, plan):
+            events.append("resume_media")
             return SimpleNamespace(
                 id=7,
                 status=PublishStatus.PUBLISHED,
@@ -621,10 +635,18 @@ def test_resumed_checkpoint_event_does_not_leak_session_or_storage(monkeypatch, 
                 source_storage_key=storage_secret,
             )
 
-    patch_dependencies(monkeypatch, FakeSession(), FakeService)
+    session = OrderedSession()
+    patch_dependencies(monkeypatch, session, FakeService)
 
-    task_module.execute_publish.run(7)
+    await task_module._run_publishing(7)
 
+    assert events == [
+        "prepare_existing_checkpoint",
+        "commit",
+        "resume_media",
+        "commit",
+    ]
+    assert session.commits == 2
     assert "publishing.execution.resumed publish_job_id=7" in caplog.text
     assert session_secret not in caplog.text
     assert storage_secret not in caplog.text
