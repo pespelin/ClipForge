@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from app.models.publish_job import PublishPlatform, PublishVisibility
 from app.schemas.publish_job import PublishingInput, PublishingResult
 
 
@@ -34,3 +36,38 @@ class ResumablePublishingProvider(Protocol):
         publishing_input: PublishingInput,
         session: ResumablePublishingSession,
     ) -> PublishingResult: ...
+
+
+class PublishingRemoteState(StrEnum):
+    """Provider-neutral remote state observed during reconciliation."""
+
+    PUBLISHED = "published"
+    PROCESSING = "processing"
+    INCOMPLETE = "incomplete"
+    NOT_FOUND = "not_found"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class PublishingReconciliationInput:
+    platform: PublishPlatform
+    account_reference: str
+    visibility: PublishVisibility
+    remote_media_id: str | None = None
+    resumable_session: ResumablePublishingSession | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PublishingReconciliationResult:
+    remote_state: PublishingRemoteState
+    publishing_result: PublishingResult | None = None
+    next_byte_offset: int | None = None
+
+
+class PublishingReconciliationProvider(Protocol):
+    """Optional provider capability for querying authoritative remote state."""
+
+    async def reconcile(
+        self,
+        reconciliation_input: PublishingReconciliationInput,
+    ) -> PublishingReconciliationResult: ...

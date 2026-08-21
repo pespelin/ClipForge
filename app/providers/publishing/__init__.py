@@ -1,5 +1,9 @@
 from app.providers.publishing.base import (
     PublishingProvider,
+    PublishingReconciliationInput,
+    PublishingReconciliationProvider,
+    PublishingReconciliationResult,
+    PublishingRemoteState,
     ResumablePublishingProvider,
     ResumablePublishingSession,
 )
@@ -44,6 +48,10 @@ __all__ = [
     "PublishingCredentialResolutionError",
     "PublishingComposition",
     "PublishingProvider",
+    "PublishingReconciliationInput",
+    "PublishingReconciliationProvider",
+    "PublishingReconciliationResult",
+    "PublishingRemoteState",
     "PublishingProviderConfigurationError",
     "ResumablePublishingProvider",
     "ResumablePublishingSession",

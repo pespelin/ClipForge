@@ -16,7 +16,12 @@ from app.core.exceptions import (
     PublishingTransientError,
 )
 from app.models.publish_job import PublishPlatform, PublishVisibility
-from app.providers.publishing.base import ResumablePublishingSession
+from app.providers.publishing.base import (
+    PublishingReconciliationInput,
+    PublishingReconciliationResult,
+    PublishingRemoteState,
+    ResumablePublishingSession,
+)
 from app.providers.publishing.dependencies import (
     PublishingArtifactReader,
     PublishingCredentialResolver,
@@ -47,6 +52,7 @@ class YouTubePublishingProvider:
     """YouTube videos.insert resumable upload adapter."""
 
     _UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/youtube/v3/videos"
+    _VIDEOS_ENDPOINT = "https://www.googleapis.com/youtube/v3/videos"
     _VIDEO_CONTENT_TYPE = "video/mp4"
     _RANGE_PATTERN = re.compile(r"bytes=0-(\d+)\Z")
     _QUOTA_REASONS = {"quotaExceeded", "dailyLimitExceeded", "dailyLimitExceededUnreg"}
@@ -130,11 +136,43 @@ class YouTubePublishingProvider:
             raise YouTubePublishingError
         return progress.publishing_result
 
+    async def reconcile(
+        self,
+        reconciliation_input: PublishingReconciliationInput,
+    ) -> PublishingReconciliationResult:
+        """Query remote state without reading or transferring the local artifact."""
+        if reconciliation_input.platform != PublishPlatform.YOUTUBE:
+            raise YouTubePublishingError
+        credential = await self._resolve_credential(reconciliation_input.account_reference)
+        if reconciliation_input.remote_media_id is not None:
+            return await self._reconcile_remote_media(
+                reconciliation_input.remote_media_id,
+                credential.access_token,
+                reconciliation_input.visibility,
+            )
+        if reconciliation_input.resumable_session is not None:
+            return await self._reconcile_session(
+                reconciliation_input.resumable_session,
+                credential.access_token,
+                reconciliation_input.visibility,
+            )
+        return PublishingReconciliationResult(PublishingRemoteState.UNKNOWN)
+
     async def _resolve_dependencies(self, publishing_input: PublishingInput):
         if publishing_input.platform != PublishPlatform.YOUTUBE:
             raise YouTubePublishingError
+        credential = await self._resolve_credential(publishing_input.account_reference)
         try:
-            credential = await self._credential_resolver.resolve(publishing_input.account_reference)
+            video_bytes = await self._artifact_reader.read(publishing_input.source_storage_key)
+        except Exception:
+            raise YouTubePublishingError from None
+        if not isinstance(video_bytes, bytes) or not video_bytes:
+            raise YouTubePublishingError
+        return credential, video_bytes
+
+    async def _resolve_credential(self, account_reference: str):
+        try:
+            credential = await self._credential_resolver.resolve(account_reference)
         except PublishingError:
             raise
         except Exception:
@@ -143,13 +181,91 @@ class YouTubePublishingProvider:
             raise YouTubePublishingError
         if not credential.access_token:
             raise YouTubePublishingError
+        return credential
+
+    async def _reconcile_remote_media(
+        self,
+        remote_media_id: str,
+        access_token: str,
+        visibility: PublishVisibility,
+    ) -> PublishingReconciliationResult:
+        query = urlencode({"part": "status,snippet", "id": remote_media_id})
+        response = await self._request(
+            "GET",
+            f"{self._VIDEOS_ENDPOINT}?{query}",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if not response.is_success:
+            self._raise_classified_error(response)
         try:
-            video_bytes = await self._artifact_reader.read(publishing_input.source_storage_key)
-        except Exception:
+            payload = response.json()
+            items = payload.get("items") if isinstance(payload, dict) else None
+        except ValueError:
             raise YouTubePublishingError from None
-        if not isinstance(video_bytes, bytes) or not video_bytes:
+        if not isinstance(items, list):
             raise YouTubePublishingError
-        return credential, video_bytes
+        if not items:
+            return PublishingReconciliationResult(PublishingRemoteState.NOT_FOUND)
+        item = items[0]
+        video_id = item.get("id") if isinstance(item, dict) else None
+        status = item.get("status") if isinstance(item, dict) else None
+        upload_status = status.get("uploadStatus") if isinstance(status, dict) else None
+        if not isinstance(video_id, str) or not video_id or video_id != remote_media_id:
+            raise YouTubePublishingError
+        if upload_status in {"failed", "rejected", "deleted"}:
+            return PublishingReconciliationResult(PublishingRemoteState.UNKNOWN)
+        if upload_status not in {None, "processed", "uploaded"}:
+            return PublishingReconciliationResult(PublishingRemoteState.PROCESSING)
+        result = self._remote_result(video_id, visibility, upload_status)
+        return PublishingReconciliationResult(PublishingRemoteState.PUBLISHED, result)
+
+    async def _reconcile_session(
+        self,
+        session: ResumablePublishingSession,
+        access_token: str,
+        visibility: PublishVisibility,
+    ) -> PublishingReconciliationResult:
+        response = await self._request(
+            "PUT",
+            session.session_uri,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Length": "0",
+                "Content-Range": f"bytes */{session.total_bytes}",
+            },
+            content=b"",
+        )
+        if response.status_code == 308:
+            offset = self._next_offset(response.headers.get("Range"), session.total_bytes)
+            return PublishingReconciliationResult(
+                PublishingRemoteState.INCOMPLETE,
+                next_byte_offset=offset,
+            )
+        if response.status_code == 404:
+            return PublishingReconciliationResult(PublishingRemoteState.NOT_FOUND)
+        if not response.is_success:
+            self._raise_classified_error(response)
+        result = self._completion_result(response, visibility)
+        return PublishingReconciliationResult(PublishingRemoteState.PUBLISHED, result)
+
+    def _remote_result(
+        self,
+        video_id: str,
+        visibility: PublishVisibility,
+        upload_status: str | None,
+    ) -> PublishingResult:
+        return PublishingResult(
+            remote_media_id=video_id,
+            remote_url=f"https://www.youtube.com/watch?v={video_id}",
+            remote_status=upload_status or "published",
+            published_at=self._clock(),
+            provider_metadata={
+                "provider": "youtube",
+                "privacy_status": self._privacy_status(visibility),
+                "reconciled": True,
+                "video_id": video_id,
+            },
+        )
 
     async def _initiate_session(
         self,
