@@ -91,7 +91,6 @@ class FakeUploadSessionService:
         self.events.append("lease_acquire")
         if (
             self.execution_owner is not None
-            and self.execution_owner != owner
             and self.execution_lease_expires_at is not None
             and self.execution_lease_expires_at > now
         ):
@@ -305,6 +304,59 @@ async def test_active_other_owner_lease_blocks_media_without_job_mutation() -> N
     assert sessions.execution_owner == "task-owner-a"
 
 
+@pytest.mark.parametrize("duplicate_owner", ["task-owner-a", "task-owner-b"])
+async def test_duplicate_delivery_during_active_upload_is_deferred_without_mutation(
+    duplicate_owner: str,
+) -> None:
+    checkpoint = PublishingUploadSessionData(
+        7,
+        PublishPlatform.YOUTUBE,
+        SESSION_URI,
+        4096,
+        1024,
+    )
+    job = publish_job(PublishStatus.PUBLISHING)
+    service, repository, provider, sessions = make_service(
+        job=job,
+        checkpoint=checkpoint,
+        owner=duplicate_owner,
+    )
+    original_expiry = NOW + timedelta(seconds=60)
+    sessions.execution_owner = "task-owner-a"
+    sessions.execution_lease_expires_at = original_expiry
+
+    with pytest.raises(PublishingExecutionLeaseUnavailableError):
+        await service.prepare_publish_job_execution(7)
+
+    assert job.status is PublishStatus.PUBLISHING
+    assert repository.saved_statuses == []
+    assert provider.initiated == []
+    assert provider.resumed == []
+    assert sessions.checkpoint is checkpoint
+    assert sessions.stored == []
+    assert sessions.deleted == []
+    assert sessions.execution_owner == "task-owner-a"
+    assert sessions.execution_lease_expires_at == original_expiry
+
+
+async def test_duplicate_delivery_after_publication_is_idempotent_no_op() -> None:
+    job = publish_job(PublishStatus.PUBLISHED)
+    service, repository, provider, sessions = make_service(job=job, owner="task-owner-b")
+
+    plan = await service.prepare_publish_job_execution(7)
+    result = await service.execute_prepared_publish(plan)
+
+    assert plan.already_complete is True
+    assert result is job
+    assert job.status is PublishStatus.PUBLISHED
+    assert repository.saved_statuses == []
+    assert provider.initiated == []
+    assert provider.resumed == []
+    assert sessions.stored == []
+    assert sessions.deleted == []
+    assert sessions.events == ["lock"]
+
+
 async def test_expired_lease_allows_new_owner_to_resume() -> None:
     checkpoint = PublishingUploadSessionData(7, PublishPlatform.YOUTUBE, SESSION_URI, 4096, 1024)
     service, _, provider, sessions = make_service(
@@ -416,7 +468,7 @@ async def test_transient_failure_retains_checkpoint_and_retry_classification() -
     assert plan.publish_job.status is PublishStatus.FAILED
 
 
-async def test_retry_uses_durable_checkpoint_and_never_reinitiates() -> None:
+async def test_duplicate_delivery_after_failure_reuses_checkpoint_without_reinitiation() -> None:
     service, _, provider, sessions = make_service()
     first_plan = await service.prepare_publish_job_execution(7)
     provider.error = RuntimeError("interrupted")
@@ -429,6 +481,9 @@ async def test_retry_uses_durable_checkpoint_and_never_reinitiates() -> None:
 
     assert len(provider.initiated) == 1
     assert len(provider.resumed) == 2
+    assert first_plan.checkpoint_created is True
+    assert second_plan.checkpoint_created is False
+    assert second_plan.resumable_session.session_uri == SESSION_URI
     assert second_plan.requires_pre_execution_commit is True
     assert result.status is PublishStatus.PUBLISHED
     assert sessions.checkpoint is None

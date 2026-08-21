@@ -86,13 +86,12 @@ class PublishingUploadSessionService:
         if upload_session is None:
             raise PublishingUploadSessionNotFoundError
 
-        active_other_owner = (
+        active_lease = (
             upload_session.execution_owner is not None
-            and upload_session.execution_owner != owner
             and upload_session.execution_lease_expires_at is not None
             and upload_session.execution_lease_expires_at > now
         )
-        if active_other_owner:
+        if active_lease:
             raise PublishingExecutionLeaseUnavailableError
 
         upload_session.execution_owner = owner

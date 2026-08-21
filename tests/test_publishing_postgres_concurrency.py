@@ -295,9 +295,41 @@ async def test_checkpoint_is_visible_to_waiter_after_claimant_commit(
         await session_b.rollback()
 
 
+async def test_duplicate_preparation_only_one_claimant_observes_missing_checkpoint(
+    postgres_session_factory,
+    postgres_rows: PostgresRows,
+) -> None:
+    initiation_decisions: list[str] = []
+    async with (
+        postgres_session_factory() as session_a,
+        postgres_session_factory() as session_b,
+    ):
+        assert await PublishJobRepository(session_a).get_for_update(postgres_rows.job_a_id)
+        repository_a = PublishingUploadSessionRepository(session_a)
+        if await repository_a.get_by_publish_job_id(postgres_rows.job_a_id) is None:
+            initiation_decisions.append("worker-a")
+            await repository_a.create(make_checkpoint(postgres_rows.job_a_id))
+
+        waiting = asyncio.create_task(
+            PublishJobRepository(session_b).get_for_update(postgres_rows.job_a_id)
+        )
+        await assert_waiting(waiting)
+        await session_a.commit()
+        assert await asyncio.wait_for(waiting, timeout=2)
+
+        repository_b = PublishingUploadSessionRepository(session_b)
+        if await repository_b.get_by_publish_job_id(postgres_rows.job_a_id) is None:
+            initiation_decisions.append("worker-b")
+
+        assert initiation_decisions == ["worker-a"]
+        await session_b.rollback()
+
+
+@pytest.mark.parametrize("claiming_owner", ["owner-a", "owner-b"])
 async def test_active_execution_lease_cannot_be_overwritten_after_serialized_lock(
     postgres_session_factory,
     postgres_rows: PostgresRows,
+    claiming_owner: str,
 ) -> None:
     expiry_a = NOW + timedelta(minutes=15)
     async with postgres_session_factory() as setup:
@@ -324,7 +356,7 @@ async def test_active_execution_lease_cannot_be_overwritten_after_serialized_loc
         with pytest.raises(PublishingExecutionLeaseUnavailableError):
             await service.acquire_execution_lease(
                 postgres_rows.job_a_id,
-                owner="owner-b",
+                owner=claiming_owner,
                 now=NOW,
                 lease_expires_at=NOW + timedelta(minutes=30),
             )

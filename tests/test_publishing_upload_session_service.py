@@ -196,20 +196,22 @@ async def test_acquire_execution_lease_without_active_owner() -> None:
     assert repository.saved == [entity]
 
 
-async def test_same_owner_reacquire_updates_expiry() -> None:
+async def test_same_owner_duplicate_acquisition_is_contended_without_mutation() -> None:
     entity = leased_entity(owner="task-owner-a", expires_at=NOW + timedelta(seconds=100))
     repository = FakeRepository(entity)
-    new_expiry = NOW + timedelta(seconds=900)
+    original_expiry = entity.execution_lease_expires_at
 
-    await make_service(repository).acquire_execution_lease(
-        7,
-        owner="task-owner-a",
-        now=NOW,
-        lease_expires_at=new_expiry,
-    )
+    with pytest.raises(PublishingExecutionLeaseUnavailableError):
+        await make_service(repository).acquire_execution_lease(
+            7,
+            owner="task-owner-a",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=900),
+        )
 
-    assert entity.execution_lease_expires_at == new_expiry
-    assert repository.saved == [entity]
+    assert entity.execution_owner == "task-owner-a"
+    assert entity.execution_lease_expires_at == original_expiry
+    assert repository.saved == []
 
 
 async def test_matching_active_owner_renews_lease_exactly() -> None:
