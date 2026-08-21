@@ -73,6 +73,9 @@ class Sessions:
         self.checkpoint = checkpoint
         self.stored = []
         self.deleted = []
+        self.execution_owner = None
+        self.execution_lease_expires_at = None
+        self.lease_checks = []
 
     async def get_by_publish_job_id(self, publish_job_id: int):
         return (
@@ -89,6 +92,15 @@ class Sessions:
         self.deleted.append(publish_job_id)
         self.checkpoint = None
         return True
+
+    async def is_execution_lease_active(self, publish_job_id: int, *, now: datetime):
+        self.lease_checks.append((publish_job_id, now))
+        return bool(
+            self.checkpoint is not None
+            and self.execution_owner is not None
+            and self.execution_lease_expires_at is not None
+            and self.execution_lease_expires_at > now
+        )
 
 
 class Provider:
@@ -128,7 +140,12 @@ def make_service(row=None, session=None, result=None, error=None):
     repository = Repository(row)
     sessions = Sessions(session)
     provider = Provider(result, error)
-    service = PublishingReconciliationService(repository, provider, sessions)
+    service = PublishingReconciliationService(
+        repository,
+        provider,
+        sessions,
+        clock=lambda: NOW,
+    )
     return service, repository, provider, sessions
 
 
@@ -150,6 +167,36 @@ async def test_non_reconcilable_local_state_is_idempotent_noop(status) -> None:
     assert provider.inputs == []
     assert repository.saved == []
     assert sessions.deleted == []
+    assert sessions.lease_checks == []
+
+
+@pytest.mark.parametrize("status", [PublishStatus.FAILED, PublishStatus.PUBLISHING])
+async def test_active_execution_lease_defers_reconciliation_without_mutation(
+    status, caplog
+) -> None:
+    owner = "task-owner-secret-16d"
+    token = "ACCESS_TOKEN_SECRET_16D"
+    caplog.set_level(logging.INFO, logger="app.services.publishing_reconciliation_service")
+    row = publish_job(status, remote_media_id="existing-video")
+    service, repository, provider, sessions = make_service(row, checkpoint(100))
+    sessions.execution_owner = owner
+    sessions.execution_lease_expires_at = NOW.replace(minute=1)
+
+    outcome = await service.reconcile(7)
+
+    assert outcome.remote_state is PublishingRemoteState.EXECUTION_ACTIVE
+    assert outcome.changed is False
+    assert provider.inputs == []
+    assert repository.saved == []
+    assert sessions.stored == []
+    assert sessions.deleted == []
+    assert sessions.checkpoint.next_byte_offset == 100
+    assert sessions.execution_owner == owner
+    assert "publishing.reconciliation.execution_active publish_job_id=7" in caplog.text
+    assert owner not in caplog.text
+    assert token not in caplog.text
+    assert SESSION_URI not in caplog.text
+    assert "channel-main" not in caplog.text
 
 
 async def test_remote_media_id_is_preferred_and_mapped_without_session_exposure() -> None:
@@ -163,6 +210,16 @@ async def test_remote_media_id_is_preferred_and_mapped_without_session_exposure(
     assert received.resumable_session is not None
     assert SESSION_URI not in repr(received)
     assert outcome.changed is False
+
+
+async def test_remote_media_id_without_checkpoint_reconciles_without_lease_lookup() -> None:
+    row = publish_job(remote_media_id="existing-video")
+    service, _, provider, sessions = make_service(row)
+
+    await service.reconcile(7)
+
+    assert len(provider.inputs) == 1
+    assert sessions.lease_checks == []
 
 
 async def test_checkpoint_without_remote_id_maps_resumable_session() -> None:
@@ -193,6 +250,8 @@ async def test_remote_completion_recovers_job_and_deletes_checkpoint(status, cap
     )
     row = publish_job(status)
     service, repository, _, sessions = make_service(row, checkpoint(1024), result)
+    sessions.execution_owner = "expired-owner"
+    sessions.execution_lease_expires_at = NOW
 
     outcome = await service.reconcile(7)
 
@@ -220,6 +279,8 @@ async def test_incomplete_upload_updates_offset_and_retains_checkpoint(caplog) -
     )
     row = publish_job()
     service, repository, _, sessions = make_service(row, checkpoint(1024), result)
+    sessions.execution_owner = "expired-owner"
+    sessions.execution_lease_expires_at = NOW.replace(year=2029)
     outcome = await service.reconcile(7)
     assert outcome.changed is True
     assert row.status is PublishStatus.FAILED

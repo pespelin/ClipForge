@@ -270,6 +270,29 @@ async def test_release_only_matching_owner() -> None:
 
 
 @pytest.mark.parametrize(
+    ("expiry", "expected"),
+    [
+        (NOW + timedelta(seconds=1), True),
+        (NOW, False),
+        (NOW - timedelta(seconds=1), False),
+    ],
+)
+async def test_execution_lease_active_semantics(expiry: datetime, expected: bool) -> None:
+    entity = leased_entity(owner="task-owner-a", expires_at=expiry)
+
+    assert (
+        await make_service(FakeRepository(entity)).is_execution_lease_active(7, now=NOW) is expected
+    )
+
+
+async def test_execution_lease_active_requires_aware_clock() -> None:
+    repository = FakeRepository(leased_entity())
+
+    with pytest.raises(ValueError):
+        await make_service(repository).is_execution_lease_active(7, now=datetime(2030, 1, 1))
+
+
+@pytest.mark.parametrize(
     ("now", "expiry"),
     [
         (datetime(2030, 1, 1), NOW + timedelta(seconds=1)),

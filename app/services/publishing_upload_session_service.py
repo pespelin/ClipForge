@@ -107,6 +107,22 @@ class PublishingUploadSessionService:
         await self.repository.save(upload_session)
         return True
 
+    async def is_execution_lease_active(
+        self,
+        publish_job_id: int,
+        *,
+        now: datetime,
+    ) -> bool:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Execution lease clock must be timezone-aware")
+        upload_session = await self.repository.get_by_publish_job_id(publish_job_id)
+        return bool(
+            upload_session is not None
+            and upload_session.execution_owner is not None
+            and upload_session.execution_lease_expires_at is not None
+            and upload_session.execution_lease_expires_at > now
+        )
+
     @staticmethod
     def _validate_lease_values(
         owner: str,

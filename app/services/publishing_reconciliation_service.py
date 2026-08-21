@@ -1,5 +1,6 @@
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -38,10 +39,12 @@ class PublishingReconciliationService:
         publish_job_repository: PublishJobRepository,
         reconciliation_provider: PublishingReconciliationProvider,
         upload_session_service: PublishingUploadSessionService,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.publish_job_repository = publish_job_repository
         self.reconciliation_provider = reconciliation_provider
         self.upload_session_service = upload_session_service
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     async def reconcile(self, publish_job_id: int) -> PublishingReconciliationOutcome:
         logger.info("publishing.reconciliation.started publish_job_id=%s", publish_job_id)
@@ -64,6 +67,20 @@ class PublishingReconciliationService:
             )
 
         checkpoint = await self.upload_session_service.get_by_publish_job_id(publish_job.id)
+        if checkpoint is not None and await self.upload_session_service.is_execution_lease_active(
+            publish_job.id,
+            now=self.clock(),
+        ):
+            logger.info(
+                "publishing.reconciliation.execution_active publish_job_id=%s "
+                "remote_state=execution_active",
+                publish_job_id,
+            )
+            return PublishingReconciliationOutcome(
+                publish_job,
+                PublishingRemoteState.EXECUTION_ACTIVE,
+                False,
+            )
         if publish_job.remote_media_id is None and checkpoint is None:
             return PublishingReconciliationOutcome(
                 publish_job,

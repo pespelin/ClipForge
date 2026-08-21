@@ -46,6 +46,7 @@ class PublishingRemoteState(StrEnum):
     INCOMPLETE = "incomplete"
     NOT_FOUND = "not_found"
     UNKNOWN = "unknown"
+    EXECUTION_ACTIVE = "execution_active"
 
 
 @dataclass(frozen=True, slots=True)
