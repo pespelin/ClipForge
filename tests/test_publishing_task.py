@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from app.core.exceptions import (
     PublishingAuthenticationError,
     PublishingError,
+    PublishingExecutionLockUnavailableError,
     PublishingPermanentError,
     PublishingQuotaExceededError,
     PublishingRateLimitError,
@@ -233,6 +234,41 @@ async def test_checkpoint_commit_failure_prevents_media_execution(monkeypatch) -
         await task_module._run_publishing(7)
 
     assert events == ["prepare", "commit"]
+    assert session.rollbacks == 1
+
+
+async def test_lock_contention_rolls_back_without_execute_or_commit(monkeypatch) -> None:
+    events = []
+
+    class OrderedSession(FakeSession):
+        async def commit(self) -> None:
+            events.append("commit")
+            await super().commit()
+
+        async def rollback(self) -> None:
+            events.append("rollback")
+            await super().rollback()
+
+    class ContendedService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare")
+            raise PublishingExecutionLockUnavailableError
+
+        async def execute_prepared_publish(self, plan):
+            events.append("execute")
+            raise AssertionError("media transfer must not start")
+
+    session = OrderedSession()
+    patch_dependencies(monkeypatch, session, ContendedService)
+
+    with pytest.raises(PublishingExecutionLockUnavailableError):
+        await task_module._run_publishing(7)
+
+    assert events == ["prepare", "rollback"]
+    assert session.commits == 0
     assert session.rollbacks == 1
 
 
@@ -540,6 +576,30 @@ def test_operational_error_uses_bounded_celery_retry(monkeypatch) -> None:
     assert task_module.execute_publish.autoretry_for == (OperationalError,)
     assert task_module.execute_publish.retry_backoff is True
     assert task_module.execute_publish.max_retries == 3
+
+
+def test_lock_contention_uses_safe_bounded_celery_retry(monkeypatch, caplog) -> None:
+    raw_secret = "POSTGRES_LOCK_SECRET_16B"
+    error = PublishingExecutionLockUnavailableError()
+    error.__cause__ = RuntimeError(raw_secret)
+
+    async def fail(publish_job_id: int):
+        raise error
+
+    retry = Mock(side_effect=Retry())
+    caplog.set_level(logging.WARNING, logger="app.tasks.publishing")
+    monkeypatch.setattr(task_module, "_run_publishing", fail)
+    monkeypatch.setattr(task_module.execute_publish, "retry", retry)
+
+    with pytest.raises(Retry):
+        task_module.execute_publish.run(7)
+
+    retry.assert_called_once_with(exc=error, countdown=5)
+    assert task_module.execute_publish.max_retries == 3
+    assert "publishing.execution.retry_scheduled publish_job_id=7" in caplog.text
+    assert "failure_category=lock_contention" in caplog.text
+    assert "retry_after_seconds=5" in caplog.text
+    assert raw_secret not in caplog.text
 
 
 @pytest.mark.parametrize(

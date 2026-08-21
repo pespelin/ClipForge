@@ -2,7 +2,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.core.exceptions import PublishingError, PublishingTransientError
+from app.core.exceptions import (
+    PublishingError,
+    PublishingExecutionLockUnavailableError,
+    PublishingTransientError,
+)
 from app.models.publish_job import PublishJob, PublishPlatform, PublishStatus
 from app.providers.publishing import ResumablePublishingSession
 from app.schemas.publish_job import PublishingInput
@@ -19,6 +23,7 @@ class FakeRepository:
         self.normal_gets = []
         self.locked_gets = []
         self.events = events if events is not None else []
+        self.lock_error: Exception | None = None
 
     async def get(self, row_id: int):
         self.normal_gets.append(row_id)
@@ -27,6 +32,8 @@ class FakeRepository:
     async def get_for_update(self, row_id: int):
         self.events.append("lock")
         self.locked_gets.append(row_id)
+        if self.lock_error is not None:
+            raise self.lock_error
         return self.row if self.row and self.row.id == row_id else None
 
     async def save(self, row):
@@ -166,6 +173,21 @@ async def test_new_session_prepare_stores_checkpoint_without_media_transfer() ->
     assert checkpoint.platform is PublishPlatform.YOUTUBE
     assert checkpoint.session_uri == SESSION_URI
     assert checkpoint.total_bytes == 4096
+
+
+async def test_lock_contention_does_not_mutate_job_checkpoint_or_provider() -> None:
+    service, repository, provider, sessions = make_service()
+    repository.lock_error = PublishingExecutionLockUnavailableError()
+
+    with pytest.raises(PublishingExecutionLockUnavailableError):
+        await service.prepare_publish_job_execution(7)
+
+    assert repository.row.status is PublishStatus.PENDING
+    assert repository.saved_statuses == []
+    assert repository.events == ["lock"]
+    assert sessions.stored == []
+    assert provider.initiated == []
+    assert provider.resumed == []
 
 
 async def test_existing_checkpoint_is_reused_without_new_initiation() -> None:

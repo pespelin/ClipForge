@@ -213,6 +213,14 @@ class PublishingTransientError(PublishingError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class PublishingExecutionLockUnavailableError(PublishingError):
+    status_code = 503
+    detail = "Publishing execution is temporarily busy"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing execution is temporarily busy")
+
+
 class PublishingRateLimitError(PublishingTransientError):
     status_code = 429
     detail = "Publishing provider rate limit exceeded"

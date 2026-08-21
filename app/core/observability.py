@@ -1,6 +1,7 @@
 from app.core.exceptions import (
     PublishingAuthenticationError,
     PublishingError,
+    PublishingExecutionLockUnavailableError,
     PublishingPermanentError,
     PublishingQuotaExceededError,
     PublishingRateLimitError,
@@ -10,6 +11,8 @@ from app.core.exceptions import (
 
 def publishing_failure_category(error: BaseException) -> str:
     """Map publishing failures to a stable, secret-safe operational category."""
+    if isinstance(error, PublishingExecutionLockUnavailableError):
+        return "lock_contention"
     if isinstance(error, PublishingRateLimitError):
         return "rate_limit"
     if isinstance(error, PublishingTransientError):

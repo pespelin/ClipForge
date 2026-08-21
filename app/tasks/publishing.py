@@ -8,6 +8,7 @@ from sqlalchemy.exc import OperationalError
 from app.core.config import get_settings
 from app.core.exceptions import (
     PublishingError,
+    PublishingExecutionLockUnavailableError,
     PublishingRateLimitError,
     PublishingTransientError,
 )
@@ -63,6 +64,9 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
                 )
             publish_job = await service.execute_prepared_publish(plan)
             await session.commit()
+        except PublishingExecutionLockUnavailableError:
+            await session.rollback()
+            raise
         except PublishingError:
             await session.commit()
             raise
@@ -94,6 +98,13 @@ def execute_publish(self, publish_job_id: int) -> dict[str, int | str | None]:
             result["publish_status"],
         )
         return result
+    except PublishingExecutionLockUnavailableError as error:
+        logger.warning(
+            "publishing.execution.retry_scheduled publish_job_id=%s "
+            "failure_category=lock_contention retry_after_seconds=5",
+            publish_job_id,
+        )
+        raise self.retry(exc=error, countdown=5) from error
     except PublishingRateLimitError as error:
         countdown = error.retry_after_seconds
         retry_countdown = countdown if countdown is not None else 5
