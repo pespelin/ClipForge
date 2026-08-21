@@ -44,3 +44,6 @@ known-first-party = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "postgres_integration: requires an explicit isolated PostgreSQL test database",
+]
