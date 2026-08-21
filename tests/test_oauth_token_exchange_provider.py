@@ -5,8 +5,11 @@ import pytest
 
 from app.providers.oauth import (
     GoogleOAuthTokenExchangeProvider,
+    OAuthTokenExchangeAuthenticationError,
     OAuthTokenExchangeError,
     OAuthTokenExchangeProvider,
+    OAuthTokenExchangeRateLimitError,
+    OAuthTokenExchangeTransientError,
 )
 
 CODE = "clipforge-test-authorization-code-never-real"
@@ -126,3 +129,26 @@ async def test_google_token_exchange_translates_transport_errors(transport_error
 
     assert "test" not in str(error.value).lower()
     assert CODE not in repr(error.value)
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_error"),
+    [
+        (
+            httpx.Response(400, json={"error": "invalid_grant"}),
+            OAuthTokenExchangeAuthenticationError,
+        ),
+        (httpx.Response(429, headers={"Retry-After": "30"}), OAuthTokenExchangeRateLimitError),
+        (httpx.Response(503), OAuthTokenExchangeTransientError),
+    ],
+)
+async def test_google_token_exchange_classifies_safe_failure_categories(
+    response: httpx.Response, expected_error
+) -> None:
+    provider, client = make_provider(lambda _: response)
+    async with client:
+        with pytest.raises(expected_error) as error:
+            await provider.exchange_code(authorization_code=CODE, code_verifier=VERIFIER)
+
+    assert CODE not in repr(error.value)
+    assert SECRET not in repr(error.value)

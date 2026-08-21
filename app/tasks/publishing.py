@@ -5,7 +5,11 @@ import httpx
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import get_settings
-from app.core.exceptions import PublishingError
+from app.core.exceptions import (
+    PublishingError,
+    PublishingRateLimitError,
+    PublishingTransientError,
+)
 from app.db.session import AsyncSessionLocal
 from app.providers.publishing import create_publishing_composition
 from app.repositories.publish_job_repository import PublishJobRepository
@@ -54,12 +58,21 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
 
 
 @celery_app.task(
+    bind=True,
     name="publish.execute",
     autoretry_for=(OperationalError,),
     retry_backoff=True,
     max_retries=3,
 )
-def execute_publish(publish_job_id: int) -> dict[str, int | str | None]:
+def execute_publish(self, publish_job_id: int) -> dict[str, int | str | None]:
     """Compose publishing dependencies and run async orchestration."""
-
-    return asyncio.run(_run_publishing(publish_job_id))
+    try:
+        return asyncio.run(_run_publishing(publish_job_id))
+    except PublishingRateLimitError as error:
+        countdown = error.retry_after_seconds
+        raise self.retry(
+            exc=error,
+            countdown=countdown if countdown is not None else 5,
+        ) from error
+    except PublishingTransientError as error:
+        raise self.retry(exc=error, countdown=5) from error

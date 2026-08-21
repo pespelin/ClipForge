@@ -7,6 +7,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
+from app.core.exceptions import PublishingTransientError
 from app.models.publish_job import PublishPlatform, PublishVisibility
 from app.providers.publishing import (
     PublishingProvider,
@@ -206,7 +207,7 @@ async def test_session_uri_is_secret_safe() -> None:
         )
     )
     async with client:
-        with pytest.raises(YouTubePublishingError) as error:
+        with pytest.raises(PublishingTransientError) as error:
             await provider.publish(publishing_input())
     assert SESSION_URI not in str(error.value)
     assert SESSION_URI not in repr(error.value)
@@ -289,37 +290,46 @@ async def test_malformed_or_invalid_range_is_rejected_safely(range_header: str) 
 
 
 @pytest.mark.parametrize(
-    "response",
-    [httpx.Response(200), httpx.Response(500, text=SESSION_URI)],
+    ("response", "expected_error"),
+    [
+        (httpx.Response(200), YouTubePublishingError),
+        (httpx.Response(500, text=SESSION_URI), PublishingTransientError),
+    ],
 )
 async def test_initiation_missing_location_or_http_failure_is_safe(
     response: httpx.Response,
+    expected_error,
 ) -> None:
     provider, client, _, _ = make_provider(lambda _: response)
     async with client:
-        with pytest.raises(YouTubePublishingError) as error:
+        with pytest.raises(expected_error) as error:
             await provider.publish(publishing_input())
     assert SESSION_URI not in repr(error.value)
     assert ACCESS_TOKEN not in repr(error.value)
 
 
 @pytest.mark.parametrize(
-    "response",
+    ("response", "expected_error"),
     [
-        httpx.Response(500, text=SESSION_URI),
-        httpx.Response(200, content=b"{"),
-        httpx.Response(200, json={}),
+        (httpx.Response(500, text=SESSION_URI), PublishingTransientError),
+        (httpx.Response(200, content=b"{"), YouTubePublishingError),
+        (httpx.Response(200, json={}), YouTubePublishingError),
     ],
 )
-async def test_upload_and_completion_failures_are_safe(response: httpx.Response) -> None:
+async def test_upload_and_completion_failures_are_safe(
+    response: httpx.Response, expected_error
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return initiation_response() if request.method == "POST" else response
 
     provider, client, _, _ = make_provider(handler)
     async with client:
-        with pytest.raises(YouTubePublishingError) as error:
+        with pytest.raises(expected_error) as error:
             await provider.publish(publishing_input())
-    assert str(error.value) == "YouTube publishing failed"
+    assert str(error.value) in {
+        "YouTube publishing failed",
+        "Publishing provider is temporarily unavailable",
+    }
     assert ACCESS_TOKEN not in repr(error.value)
     assert SESSION_URI not in repr(error.value)
 
@@ -333,7 +343,7 @@ async def test_transport_failures_are_normalized(failure: str) -> None:
 
     provider, client, _, _ = make_provider(handler)
     async with client:
-        with pytest.raises(YouTubePublishingError):
+        with pytest.raises(PublishingTransientError):
             await provider.publish(publishing_input())
 
 

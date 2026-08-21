@@ -7,8 +7,17 @@ from app.core.exceptions import (
     OAuthCredentialRefreshFailedError,
     OAuthCredentialRefreshUnavailableError,
     OAuthCredentialUnavailableError,
+    PublishingAuthenticationError,
+    PublishingRateLimitError,
+    PublishingTransientError,
 )
-from app.providers.oauth import OAuthTokenRefreshError, OAuthTokenResult
+from app.providers.oauth import (
+    OAuthTokenRefreshAuthenticationError,
+    OAuthTokenRefreshError,
+    OAuthTokenRefreshRateLimitError,
+    OAuthTokenRefreshTransientError,
+    OAuthTokenResult,
+)
 from app.security import CredentialEncryptionError
 from app.services.oauth_credential_resolver import (
     OAuthCredentialResolver,
@@ -44,13 +53,16 @@ class FakeCredentialService:
 
 
 class FakeRefreshProvider:
-    def __init__(self, result=None, *, fail: bool = False) -> None:
+    def __init__(self, result=None, *, fail: bool = False, error=None) -> None:
         self.result = result or OAuthTokenResult(access_token=NEW_ACCESS_TOKEN)
         self.fail = fail
+        self.error = error
         self.calls: list[str] = []
 
     async def refresh_token(self, *, refresh_token: str):
         self.calls.append(refresh_token)
+        if self.error is not None:
+            raise self.error
         if self.fail:
             raise OAuthTokenRefreshError
         return self.result
@@ -204,3 +216,33 @@ def test_resolved_credential_repr_hides_access_token() -> None:
     result = ResolvedOAuthCredential(access_token=ACCESS_TOKEN)
 
     assert ACCESS_TOKEN not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_error", "retry_after"),
+    [
+        (OAuthTokenRefreshTransientError(), PublishingTransientError, None),
+        (
+            OAuthTokenRefreshRateLimitError(retry_after_seconds=75),
+            PublishingRateLimitError,
+            75,
+        ),
+        (OAuthTokenRefreshAuthenticationError(), PublishingAuthenticationError, None),
+    ],
+)
+async def test_refresh_classification_propagates_safely_without_persistence(
+    provider_error, expected_error, retry_after
+) -> None:
+    credentials = FakeCredentialService(credential(expires_at=NOW))
+    resolver, _ = make_resolver(
+        credentials,
+        FakeRefreshProvider(error=provider_error),
+    )
+
+    with pytest.raises(expected_error) as error:
+        await resolver.resolve(7)
+
+    assert credentials.stores == []
+    assert REFRESH_TOKEN not in repr(error.value)
+    if isinstance(error.value, PublishingTransientError):
+        assert error.value.retry_after_seconds == retry_after

@@ -7,6 +7,14 @@ from urllib.parse import urlencode
 
 import httpx
 
+from app.core.exceptions import (
+    PublishingAuthenticationError,
+    PublishingError,
+    PublishingPermanentError,
+    PublishingQuotaExceededError,
+    PublishingRateLimitError,
+    PublishingTransientError,
+)
 from app.models.publish_job import PublishPlatform, PublishVisibility
 from app.providers.publishing.base import ResumablePublishingSession
 from app.providers.publishing.dependencies import (
@@ -41,6 +49,9 @@ class YouTubePublishingProvider:
     _UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/youtube/v3/videos"
     _VIDEO_CONTENT_TYPE = "video/mp4"
     _RANGE_PATTERN = re.compile(r"bytes=0-(\d+)\Z")
+    _QUOTA_REASONS = {"quotaExceeded", "dailyLimitExceeded", "dailyLimitExceededUnreg"}
+    _RATE_LIMIT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
+    _AUTH_REASONS = {"authError", "invalidCredentials", "insufficientPermissions"}
     _PRIVACY_STATUS = {
         PublishVisibility.PUBLIC: "public",
         PublishVisibility.PRIVATE: "private",
@@ -124,6 +135,8 @@ class YouTubePublishingProvider:
             raise YouTubePublishingError
         try:
             credential = await self._credential_resolver.resolve(publishing_input.account_reference)
+        except PublishingError:
+            raise
         except Exception:
             raise YouTubePublishingError from None
         if credential.token_type is not None and credential.token_type.casefold() != "bearer":
@@ -168,7 +181,7 @@ class YouTubePublishingProvider:
             content=metadata,
         )
         if not response.is_success:
-            raise YouTubePublishingError
+            self._raise_classified_error(response)
         session_uri = response.headers.get("Location")
         if not session_uri or not session_uri.strip():
             raise YouTubePublishingError
@@ -223,7 +236,7 @@ class YouTubePublishingProvider:
         try:
             return await self._http_client.request(method, url, timeout=30.0, **kwargs)
         except (httpx.TimeoutException, httpx.RequestError):
-            raise YouTubePublishingError from None
+            raise PublishingTransientError from None
 
     def _interpret_response(
         self,
@@ -235,9 +248,52 @@ class YouTubePublishingProvider:
             offset = self._next_offset(response.headers.get("Range"), total_bytes)
             return YouTubeResumableUploadProgress(False, offset)
         if not response.is_success:
-            raise YouTubePublishingError
+            self._raise_classified_error(response)
         result = self._completion_result(response, visibility)
         return YouTubeResumableUploadProgress(True, total_bytes, result)
+
+    @classmethod
+    def _raise_classified_error(cls, response: httpx.Response) -> None:
+        status = response.status_code
+        reasons = cls._error_reasons(response)
+        retry_after = cls._retry_after_seconds(response.headers.get("Retry-After"))
+        if reasons & cls._QUOTA_REASONS:
+            raise PublishingQuotaExceededError
+        if status == 429 or reasons & cls._RATE_LIMIT_REASONS:
+            raise PublishingRateLimitError(retry_after_seconds=retry_after)
+        if status == 401 or reasons & cls._AUTH_REASONS:
+            raise PublishingAuthenticationError
+        if status in {408, 500, 502, 503, 504}:
+            raise PublishingTransientError(retry_after_seconds=retry_after)
+        if 400 <= status < 500:
+            raise PublishingPermanentError
+        raise YouTubePublishingError
+
+    @staticmethod
+    def _error_reasons(response: httpx.Response) -> set[str]:
+        try:
+            payload = response.json()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            errors = error.get("errors") if isinstance(error, dict) else None
+            if not isinstance(errors, list):
+                return set()
+            return {
+                reason
+                for item in errors
+                if isinstance(item, dict) and isinstance((reason := item.get("reason")), str)
+            }
+        except (TypeError, ValueError):
+            return set()
+
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            seconds = int(value)
+        except ValueError:
+            return None
+        return seconds if seconds >= 0 else None
 
     @classmethod
     def _next_offset(cls, range_header: str | None, total_bytes: int) -> int:

@@ -1,3 +1,4 @@
+from app.core.exceptions import PublishingError
 from app.models.publish_job import PublishPlatform
 from app.providers.publishing.dependencies import PublishingAccessCredential
 from app.repositories.publishing_account_repository import PublishingAccountRepository
@@ -36,6 +37,8 @@ class OAuthPublishingCredentialResolver:
                 raise PublishingCredentialResolutionError
             return await self._credential_resolver.resolve(account.id)
         except PublishingCredentialResolutionError:
+            raise
+        except PublishingError:
             raise
         except Exception:
             raise PublishingCredentialResolutionError from None

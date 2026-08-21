@@ -8,7 +8,12 @@ from celery.exceptions import Retry
 from sqlalchemy.exc import OperationalError
 
 from app.core.exceptions import (
+    PublishingAuthenticationError,
     PublishingError,
+    PublishingPermanentError,
+    PublishingQuotaExceededError,
+    PublishingRateLimitError,
+    PublishingTransientError,
     PublishJobCancelledError,
     PublishNotDueError,
 )
@@ -525,6 +530,53 @@ def test_operational_error_uses_bounded_celery_retry(monkeypatch) -> None:
     assert task_module.execute_publish.autoretry_for == (OperationalError,)
     assert task_module.execute_publish.retry_backoff is True
     assert task_module.execute_publish.max_retries == 3
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_countdown"),
+    [
+        (PublishingTransientError(), 5),
+        (PublishingRateLimitError(), 5),
+        (PublishingRateLimitError(retry_after_seconds=120), 120),
+    ],
+)
+def test_retryable_publishing_errors_use_bounded_celery_retry(
+    monkeypatch, error, expected_countdown
+) -> None:
+    async def fail(publish_job_id: int):
+        raise error
+
+    retry = Mock(side_effect=Retry())
+    monkeypatch.setattr(task_module, "_run_publishing", fail)
+    monkeypatch.setattr(task_module.execute_publish, "retry", retry)
+
+    with pytest.raises(Retry):
+        task_module.execute_publish.run(7)
+
+    retry.assert_called_once_with(exc=error, countdown=expected_countdown)
+    assert task_module.execute_publish.max_retries == 3
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PublishingQuotaExceededError(),
+        PublishingAuthenticationError(),
+        PublishingPermanentError(),
+    ],
+)
+def test_non_retryable_publishing_errors_do_not_auto_retry(monkeypatch, error) -> None:
+    async def fail(publish_job_id: int):
+        raise error
+
+    retry = Mock(side_effect=AssertionError("retry must not run"))
+    monkeypatch.setattr(task_module, "_run_publishing", fail)
+    monkeypatch.setattr(task_module.execute_publish, "retry", retry)
+
+    with pytest.raises(type(error)):
+        task_module.execute_publish.run(7)
+
+    retry.assert_not_called()
 
 
 def test_task_contains_only_composition_and_transaction_boundary() -> None:

@@ -1,9 +1,15 @@
 from app.providers.oauth.base import (
     OAuthAuthorizationProvider,
+    OAuthTokenExchangeAuthenticationError,
     OAuthTokenExchangeError,
     OAuthTokenExchangeProvider,
+    OAuthTokenExchangeRateLimitError,
+    OAuthTokenExchangeTransientError,
+    OAuthTokenRefreshAuthenticationError,
     OAuthTokenRefreshError,
     OAuthTokenRefreshProvider,
+    OAuthTokenRefreshRateLimitError,
+    OAuthTokenRefreshTransientError,
     OAuthTokenResult,
 )
 from app.providers.oauth.google import (
@@ -17,9 +23,15 @@ __all__ = [
     "GoogleOAuthTokenExchangeProvider",
     "GoogleOAuthTokenRefreshProvider",
     "OAuthAuthorizationProvider",
+    "OAuthTokenExchangeAuthenticationError",
     "OAuthTokenExchangeError",
     "OAuthTokenExchangeProvider",
+    "OAuthTokenExchangeRateLimitError",
+    "OAuthTokenExchangeTransientError",
+    "OAuthTokenRefreshAuthenticationError",
     "OAuthTokenRefreshError",
     "OAuthTokenRefreshProvider",
+    "OAuthTokenRefreshRateLimitError",
+    "OAuthTokenRefreshTransientError",
     "OAuthTokenResult",
 ]

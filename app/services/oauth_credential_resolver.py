@@ -7,8 +7,17 @@ from app.core.exceptions import (
     OAuthCredentialRefreshFailedError,
     OAuthCredentialRefreshUnavailableError,
     OAuthCredentialUnavailableError,
+    PublishingAuthenticationError,
+    PublishingRateLimitError,
+    PublishingTransientError,
 )
-from app.providers.oauth import OAuthTokenRefreshError, OAuthTokenRefreshProvider
+from app.providers.oauth import (
+    OAuthTokenRefreshAuthenticationError,
+    OAuthTokenRefreshError,
+    OAuthTokenRefreshProvider,
+    OAuthTokenRefreshRateLimitError,
+    OAuthTokenRefreshTransientError,
+)
 from app.security import CredentialEncryptionError
 from app.services.oauth_credential_service import OAuthCredentialInput, OAuthCredentialService
 
@@ -60,6 +69,12 @@ class OAuthCredentialResolver:
             refreshed = await self._refresh_provider.refresh_token(
                 refresh_token=credential.refresh_token
             )
+        except OAuthTokenRefreshRateLimitError as error:
+            raise PublishingRateLimitError(retry_after_seconds=error.retry_after_seconds) from None
+        except OAuthTokenRefreshAuthenticationError:
+            raise PublishingAuthenticationError from None
+        except OAuthTokenRefreshTransientError:
+            raise PublishingTransientError from None
         except OAuthTokenRefreshError:
             raise OAuthCredentialRefreshFailedError from None
 

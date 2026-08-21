@@ -201,6 +201,49 @@ class PublishingError(AppError):
     status_code = 422
     detail = "Publishing failed"
 
+    def __init__(self, message: str = "Publishing failed") -> None:
+        super().__init__(message)
+
+
+class PublishingTransientError(PublishingError):
+    detail = "Publishing provider is temporarily unavailable"
+
+    def __init__(self, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__("Publishing provider is temporarily unavailable")
+        self.retry_after_seconds = retry_after_seconds
+
+
+class PublishingRateLimitError(PublishingTransientError):
+    status_code = 429
+    detail = "Publishing provider rate limit exceeded"
+
+    def __init__(self, *, retry_after_seconds: int | None = None) -> None:
+        PublishingError.__init__(self, "Publishing provider rate limit exceeded")
+        self.retry_after_seconds = retry_after_seconds
+
+
+class PublishingQuotaExceededError(PublishingError):
+    status_code = 429
+    detail = "Publishing provider quota exhausted"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing provider quota exhausted")
+
+
+class PublishingAuthenticationError(PublishingError):
+    status_code = 409
+    detail = "Publishing account must be reconnected"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing account must be reconnected")
+
+
+class PublishingPermanentError(PublishingError):
+    detail = "Publishing request was rejected"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing request was rejected")
+
 
 class PublishEnqueueError(AppError):
     status_code = 503

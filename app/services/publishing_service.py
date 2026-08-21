@@ -172,6 +172,8 @@ class PublishingService:
             return PublishingExecutionPlan(publish_job, publishing_input, session, True)
         except Exception as error:
             await self._mark_failed(publish_job, error)
+            if isinstance(error, PublishingError):
+                raise
             raise PublishingError from error
 
     async def execute_prepared_publish(self, plan: PublishingExecutionPlan) -> PublishJob:
@@ -201,6 +203,8 @@ class PublishingService:
             return await self.publish_job_repository.save(publish_job)
         except Exception as error:
             await self._mark_failed(publish_job, error)
+            if isinstance(error, PublishingError):
+                raise
             raise PublishingError from error
 
     async def _mark_failed(self, publish_job: PublishJob, error: Exception) -> None:

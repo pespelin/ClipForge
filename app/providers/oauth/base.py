@@ -9,11 +9,43 @@ class OAuthTokenExchangeError(Exception):
         super().__init__("OAuth token exchange failed")
 
 
+class OAuthTokenExchangeTransientError(OAuthTokenExchangeError):
+    """Raised when code exchange may succeed on a later attempt."""
+
+
+class OAuthTokenExchangeRateLimitError(OAuthTokenExchangeTransientError):
+    """Raised when the token endpoint rate limits code exchange."""
+
+    def __init__(self, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__()
+        self.retry_after_seconds = retry_after_seconds
+
+
+class OAuthTokenExchangeAuthenticationError(OAuthTokenExchangeError):
+    """Raised when the supplied authorization grant is invalid."""
+
+
 class OAuthTokenRefreshError(Exception):
     """Raised when an OAuth access token cannot be refreshed safely."""
 
     def __init__(self) -> None:
         super().__init__("OAuth token refresh failed")
+
+
+class OAuthTokenRefreshTransientError(OAuthTokenRefreshError):
+    """Raised when refreshing may succeed on a later attempt."""
+
+
+class OAuthTokenRefreshRateLimitError(OAuthTokenRefreshTransientError):
+    """Raised when the token endpoint rate limits refresh attempts."""
+
+    def __init__(self, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__()
+        self.retry_after_seconds = retry_after_seconds
+
+
+class OAuthTokenRefreshAuthenticationError(OAuthTokenRefreshError):
+    """Raised when the stored refresh grant requires account reconnection."""
 
 
 @dataclass(frozen=True, slots=True)

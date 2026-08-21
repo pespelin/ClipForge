@@ -5,8 +5,11 @@ import pytest
 
 from app.providers.oauth import (
     GoogleOAuthTokenRefreshProvider,
+    OAuthTokenRefreshAuthenticationError,
     OAuthTokenRefreshError,
     OAuthTokenRefreshProvider,
+    OAuthTokenRefreshRateLimitError,
+    OAuthTokenRefreshTransientError,
 )
 
 SECRET = "clipforge-test-client-secret-never-real"
@@ -123,4 +126,44 @@ async def test_google_refresh_translates_transport_errors(transport_error: str) 
             await provider.refresh_token(refresh_token=REFRESH_TOKEN)
 
     assert "test" not in str(error.value).lower()
+    assert REFRESH_TOKEN not in repr(error.value)
+
+
+async def test_google_refresh_invalid_grant_requires_reconnect_without_leakage() -> None:
+    provider, client = make_provider(
+        lambda _: httpx.Response(
+            400,
+            json={"error": "invalid_grant", "error_description": REFRESH_TOKEN},
+        )
+    )
+    async with client:
+        with pytest.raises(OAuthTokenRefreshAuthenticationError) as error:
+            await provider.refresh_token(refresh_token=REFRESH_TOKEN)
+
+    assert REFRESH_TOKEN not in repr(error.value)
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+async def test_google_refresh_server_failures_are_transient(status: int) -> None:
+    provider, client = make_provider(lambda _: httpx.Response(status, text=REFRESH_TOKEN))
+    async with client:
+        with pytest.raises(OAuthTokenRefreshTransientError) as error:
+            await provider.refresh_token(refresh_token=REFRESH_TOKEN)
+
+    assert REFRESH_TOKEN not in repr(error.value)
+
+
+async def test_google_refresh_rate_limit_exposes_only_safe_retry_after() -> None:
+    provider, client = make_provider(
+        lambda _: httpx.Response(
+            429,
+            headers={"Retry-After": "45"},
+            text=REFRESH_TOKEN,
+        )
+    )
+    async with client:
+        with pytest.raises(OAuthTokenRefreshRateLimitError) as error:
+            await provider.refresh_token(refresh_token=REFRESH_TOKEN)
+
+    assert error.value.retry_after_seconds == 45
     assert REFRESH_TOKEN not in repr(error.value)

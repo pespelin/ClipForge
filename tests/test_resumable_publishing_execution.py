@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.core.exceptions import PublishingError
+from app.core.exceptions import PublishingError, PublishingTransientError
 from app.models.publish_job import PublishJob, PublishPlatform, PublishStatus
 from app.providers.publishing import ResumablePublishingSession
 from app.schemas.publish_job import PublishingInput
@@ -178,6 +178,20 @@ async def test_provider_failure_marks_failed_but_retains_checkpoint() -> None:
     plan = await service.prepare_publish_job_execution(7)
 
     with pytest.raises(PublishingError):
+        await service.execute_prepared_publish(plan)
+
+    assert sessions.deleted == []
+    assert sessions.checkpoint is checkpoint
+    assert plan.publish_job.status is PublishStatus.FAILED
+
+
+async def test_transient_failure_retains_checkpoint_and_retry_classification() -> None:
+    checkpoint = PublishingUploadSessionData(7, PublishPlatform.YOUTUBE, SESSION_URI, 4096)
+    service, _, provider, sessions = make_service(checkpoint=checkpoint)
+    provider.error = PublishingTransientError()
+    plan = await service.prepare_publish_job_execution(7)
+
+    with pytest.raises(PublishingTransientError):
         await service.execute_prepared_publish(plan)
 
     assert sessions.deleted == []

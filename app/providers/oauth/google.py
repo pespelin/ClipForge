@@ -3,8 +3,14 @@ from urllib.parse import urlencode
 import httpx
 
 from app.providers.oauth.base import (
+    OAuthTokenExchangeAuthenticationError,
     OAuthTokenExchangeError,
+    OAuthTokenExchangeRateLimitError,
+    OAuthTokenExchangeTransientError,
+    OAuthTokenRefreshAuthenticationError,
     OAuthTokenRefreshError,
+    OAuthTokenRefreshRateLimitError,
+    OAuthTokenRefreshTransientError,
     OAuthTokenResult,
 )
 
@@ -99,9 +105,18 @@ class GoogleOAuthTokenExchangeProvider:
                 },
             )
         except (httpx.TimeoutException, httpx.RequestError):
-            raise OAuthTokenExchangeError from None
+            raise OAuthTokenExchangeTransientError from None
 
         if not response.is_success:
+            error_code = _error_code(response)
+            if error_code == "invalid_grant" or response.status_code == 401:
+                raise OAuthTokenExchangeAuthenticationError
+            if response.status_code == 429:
+                raise OAuthTokenExchangeRateLimitError(
+                    retry_after_seconds=_retry_after_seconds(response.headers.get("Retry-After"))
+                )
+            if response.status_code in {408, 500, 502, 503, 504}:
+                raise OAuthTokenExchangeTransientError
             raise OAuthTokenExchangeError
         try:
             payload = response.json()
@@ -136,11 +151,39 @@ class GoogleOAuthTokenRefreshProvider:
                 },
             )
         except (httpx.TimeoutException, httpx.RequestError):
-            raise OAuthTokenRefreshError from None
+            raise OAuthTokenRefreshTransientError from None
 
         if not response.is_success:
+            error_code = _error_code(response)
+            if error_code == "invalid_grant" or response.status_code == 401:
+                raise OAuthTokenRefreshAuthenticationError
+            if response.status_code == 429:
+                raise OAuthTokenRefreshRateLimitError(
+                    retry_after_seconds=_retry_after_seconds(response.headers.get("Retry-After"))
+                )
+            if response.status_code in {408, 500, 502, 503, 504}:
+                raise OAuthTokenRefreshTransientError
             raise OAuthTokenRefreshError
         try:
             return _parse_token_result(response.json())
         except (TypeError, ValueError):
             raise OAuthTokenRefreshError from None
+
+
+def _error_code(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+        error = payload.get("error") if isinstance(payload, dict) else None
+        return error if isinstance(error, str) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _retry_after_seconds(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        seconds = int(value)
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
