@@ -452,7 +452,7 @@ def test_cancel_active_or_published_returns_409(state) -> None:
     assert response.status_code == 409
 
 
-def test_dependency_composes_repositories_and_shared_provider(monkeypatch) -> None:
+async def test_dependency_composes_repositories_and_shared_provider(monkeypatch) -> None:
     session = object()
     render_repository = object()
     job_repository = object()
@@ -461,15 +461,58 @@ def test_dependency_composes_repositories_and_shared_provider(monkeypatch) -> No
         dependency_module, "VideoRenderRepository", lambda received: render_repository
     )
     monkeypatch.setattr(dependency_module, "PublishJobRepository", lambda received: job_repository)
-    factory = Mock(return_value=provider)
-    monkeypatch.setattr(dependency_module, "create_publishing_provider", factory)
+    composition = SimpleNamespace(provider=provider, upload_session_service=None)
+    factory = Mock(return_value=composition)
+    monkeypatch.setattr(dependency_module, "create_publishing_composition", factory)
 
-    service = dependency_module.get_publishing_service(session)
+    dependency = dependency_module.get_publishing_service(session)
+    service = await anext(dependency)
+    await dependency.aclose()
 
     assert service.video_render_repository is render_repository
     assert service.publish_job_repository is job_repository
     assert service.publishing_provider is provider
-    factory.assert_called_once_with()
+    factory.assert_called_once()
+
+
+async def test_youtube_dependency_uses_managed_http_client_and_shared_composition(
+    monkeypatch,
+) -> None:
+    session = object()
+    client = object()
+    lifecycle = []
+    settings = SimpleNamespace(publishing_provider="youtube")
+    composition = SimpleNamespace(provider=object(), upload_session_service=object())
+
+    class ClientContext:
+        async def __aenter__(self):
+            lifecycle.append("entered")
+            return client
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            lifecycle.append("closed")
+
+    factory = Mock(return_value=composition)
+    monkeypatch.setattr(dependency_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(dependency_module.httpx, "AsyncClient", lambda **kwargs: ClientContext())
+    monkeypatch.setattr(dependency_module, "create_publishing_composition", factory)
+    monkeypatch.setattr(dependency_module, "VideoRenderRepository", lambda received: object())
+    monkeypatch.setattr(dependency_module, "PublishJobRepository", lambda received: object())
+
+    dependency = dependency_module.get_publishing_service(session)
+    service = await anext(dependency)
+
+    assert lifecycle == ["entered"]
+    factory.assert_called_once_with(
+        settings=settings,
+        session=session,
+        http_client=client,
+    )
+    assert service.publishing_provider is composition.provider
+    assert service.upload_session_service is composition.upload_session_service
+
+    await dependency.aclose()
+    assert lifecycle == ["entered", "closed"]
 
 
 def test_routes_contain_no_repository_or_provider_construction() -> None:

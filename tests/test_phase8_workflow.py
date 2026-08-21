@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -163,7 +164,11 @@ class Phase8Harness:
         monkeypatch.setattr(publishing_task, "AsyncSessionLocal", lambda: self.session)
         monkeypatch.setattr(publishing_task, "VideoRenderRepository", InMemoryVideoRenderRepository)
         monkeypatch.setattr(publishing_task, "PublishJobRepository", InMemoryPublishJobRepository)
-        monkeypatch.setattr(publishing_task, "create_publishing_provider", lambda: self.provider)
+        monkeypatch.setattr(
+            publishing_task,
+            "create_publishing_composition",
+            lambda **kwargs: SimpleNamespace(provider=self.provider, upload_session_service=None),
+        )
 
     def _service(self, provider) -> PublishingService:
         return PublishingService(self.render_repository, self.job_repository, provider)

@@ -1,10 +1,13 @@
 import asyncio
+from contextlib import AsyncExitStack
 
+import httpx
 from sqlalchemy.exc import OperationalError
 
+from app.core.config import get_settings
 from app.core.exceptions import PublishingError
 from app.db.session import AsyncSessionLocal
-from app.providers.publishing import create_publishing_provider
+from app.providers.publishing import create_publishing_composition
 from app.repositories.publish_job_repository import PublishJobRepository
 from app.repositories.video_render_repository import VideoRenderRepository
 from app.services.publishing_service import PublishingService
@@ -12,11 +15,24 @@ from app.workers.celery_app import celery_app
 
 
 async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
-    async with AsyncSessionLocal() as session:
+    async with AsyncExitStack() as stack:
+        session = await stack.enter_async_context(AsyncSessionLocal())
+        settings = get_settings()
+        http_client = (
+            await stack.enter_async_context(httpx.AsyncClient(timeout=30.0))
+            if settings.publishing_provider == "youtube"
+            else None
+        )
+        composition = create_publishing_composition(
+            settings=settings,
+            session=session if http_client is not None else None,
+            http_client=http_client,
+        )
         service = PublishingService(
             video_render_repository=VideoRenderRepository(session),
             publish_job_repository=PublishJobRepository(session),
-            publishing_provider=create_publishing_provider(),
+            publishing_provider=composition.provider,
+            upload_session_service=composition.upload_session_service,
         )
         try:
             plan = await service.prepare_publish_job_execution(publish_job_id)

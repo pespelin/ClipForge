@@ -16,7 +16,7 @@ from app.providers.oauth import (
     GoogleOAuthAuthorizationProvider,
     GoogleOAuthTokenExchangeProvider,
 )
-from app.providers.publishing import create_publishing_provider
+from app.providers.publishing import create_publishing_composition
 from app.providers.render import FFmpegVideoRenderer
 from app.providers.script import LocalScriptGenerator
 from app.providers.tts import LocalTTSProvider
@@ -143,12 +143,35 @@ def get_video_render_service(session: DatabaseSession) -> VideoRenderService:
 VideoRenderServiceDependency = Annotated[VideoRenderService, Depends(get_video_render_service)]
 
 
-def get_publishing_service(session: DatabaseSession) -> PublishingService:
+def _publishing_service_from_composition(session: AsyncSession, composition) -> PublishingService:
     return PublishingService(
         video_render_repository=VideoRenderRepository(session),
         publish_job_repository=PublishJobRepository(session),
-        publishing_provider=create_publishing_provider(),
+        publishing_provider=composition.provider,
+        upload_session_service=composition.upload_session_service,
     )
+
+
+async def get_publishing_service(
+    session: DatabaseSession,
+) -> AsyncGenerator[PublishingService]:
+    settings = get_settings()
+    if settings.publishing_provider == "local":
+        yield _publishing_service_from_composition(
+            session,
+            create_publishing_composition(settings=settings),
+        )
+        return
+
+    async with httpx.AsyncClient(timeout=30.0) as http_client:
+        yield _publishing_service_from_composition(
+            session,
+            create_publishing_composition(
+                settings=settings,
+                session=session,
+                http_client=http_client,
+            ),
+        )
 
 
 PublishingServiceDependency = Annotated[PublishingService, Depends(get_publishing_service)]

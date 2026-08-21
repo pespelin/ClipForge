@@ -41,7 +41,11 @@ def patch_dependencies(monkeypatch, session: FakeSession, service_type: type) ->
     monkeypatch.setattr(task_module, "AsyncSessionLocal", lambda: session)
     monkeypatch.setattr(task_module, "VideoRenderRepository", lambda received: object())
     monkeypatch.setattr(task_module, "PublishJobRepository", lambda received: object())
-    monkeypatch.setattr(task_module, "create_publishing_provider", object)
+    monkeypatch.setattr(
+        task_module,
+        "create_publishing_composition",
+        lambda **kwargs: SimpleNamespace(provider=object(), upload_session_service=None),
+    )
     monkeypatch.setattr(task_module, "PublishingService", service_type)
 
 
@@ -72,9 +76,11 @@ async def test_task_composes_dependencies_and_returns_result(monkeypatch) -> Non
     monkeypatch.setattr(
         task_module, "PublishJobRepository", lambda received: publish_job_repository
     )
-    factory = Mock(return_value=provider)
-    monkeypatch.setattr(task_module, "create_publishing_provider", factory)
+    factory = Mock(return_value=SimpleNamespace(provider=provider, upload_session_service=None))
+    monkeypatch.setattr(task_module, "create_publishing_composition", factory)
     monkeypatch.setattr(task_module, "PublishingService", FakeService)
+    http_client_factory = Mock(side_effect=AssertionError("local mode must not create HTTP"))
+    monkeypatch.setattr(task_module.httpx, "AsyncClient", http_client_factory)
 
     result = await task_module._run_publishing(7)
 
@@ -86,11 +92,72 @@ async def test_task_composes_dependencies_and_returns_result(monkeypatch) -> Non
     assert dependencies["video_render_repository"] is render_repository
     assert dependencies["publish_job_repository"] is publish_job_repository
     assert dependencies["publishing_provider"] is provider
-    factory.assert_called_once_with()
+    factory.assert_called_once()
     assert dependencies["publish_job_id"] == 7
     assert session.commits == 1
     assert session.rollbacks == 0
     assert session.closed
+    http_client_factory.assert_not_called()
+
+
+async def test_youtube_task_composes_managed_http_and_checkpoint_dependencies(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    provider = object()
+    upload_session_service = object()
+    client = object()
+    captured = {}
+
+    class ClientContext:
+        async def __aenter__(self):
+            captured["client_entered"] = True
+            return client
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            captured["client_closed"] = True
+
+    class FakeService:
+        def __init__(self, **dependencies):
+            captured.update(dependencies)
+
+        async def prepare_publish_job_execution(self, publish_job_id):
+            return SimpleNamespace(requires_checkpoint_commit=False)
+
+        async def execute_prepared_publish(self, plan):
+            return SimpleNamespace(
+                id=7,
+                status=PublishStatus.PUBLISHED,
+                remote_media_id="youtube-123",
+            )
+
+    settings = SimpleNamespace(publishing_provider="youtube")
+    factory = Mock(
+        return_value=SimpleNamespace(
+            provider=provider,
+            upload_session_service=upload_session_service,
+        )
+    )
+    monkeypatch.setattr(task_module, "AsyncSessionLocal", lambda: session)
+    monkeypatch.setattr(task_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(task_module.httpx, "AsyncClient", lambda **kwargs: ClientContext())
+    monkeypatch.setattr(task_module, "create_publishing_composition", factory)
+    monkeypatch.setattr(task_module, "VideoRenderRepository", lambda received: object())
+    monkeypatch.setattr(task_module, "PublishJobRepository", lambda received: object())
+    monkeypatch.setattr(task_module, "PublishingService", FakeService)
+
+    result = await task_module._run_publishing(7)
+
+    assert result["remote_media_id"] == "youtube-123"
+    factory.assert_called_once_with(
+        settings=settings,
+        session=session,
+        http_client=client,
+    )
+    assert captured["publishing_provider"] is provider
+    assert captured["upload_session_service"] is upload_session_service
+    assert captured["client_entered"] is True
+    assert captured["client_closed"] is True
 
 
 async def test_resumable_checkpoint_commit_precedes_execute_and_final_commit(
@@ -355,7 +422,11 @@ def patch_real_service(
         task_module, "VideoRenderRepository", lambda received: UnexpectedRenderRepository()
     )
     monkeypatch.setattr(task_module, "PublishJobRepository", lambda received: repository)
-    monkeypatch.setattr(task_module, "create_publishing_provider", lambda: provider)
+    monkeypatch.setattr(
+        task_module,
+        "create_publishing_composition",
+        lambda **kwargs: SimpleNamespace(provider=provider, upload_session_service=None),
+    )
     monkeypatch.setattr(task_module, "PublishingService", PublishingService)
 
 
