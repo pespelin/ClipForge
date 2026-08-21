@@ -229,6 +229,14 @@ class PublishingExecutionLeaseUnavailableError(PublishingError):
         super().__init__("Publishing execution is already in progress")
 
 
+class PublishingExecutionLeaseLostError(PublishingError):
+    status_code = 503
+    detail = "Publishing execution ownership was lost"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing execution ownership was lost")
+
+
 class PublishingExecutionOwnerUnavailableError(PublishingError):
     status_code = 503
     detail = "Publishing execution owner is unavailable"

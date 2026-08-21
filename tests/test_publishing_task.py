@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from app.core.exceptions import (
     PublishingAuthenticationError,
     PublishingError,
+    PublishingExecutionLeaseLostError,
     PublishingExecutionLeaseUnavailableError,
     PublishingExecutionLockUnavailableError,
     PublishingPermanentError,
@@ -304,6 +305,41 @@ async def test_lease_contention_rolls_back_without_execute_or_commit(monkeypatch
 
     assert events == ["prepare", "rollback"]
     assert session.commits == 0
+    assert session.rollbacks == 1
+
+
+async def test_lease_lost_during_execution_rolls_back_without_final_commit(monkeypatch) -> None:
+    events = []
+
+    class OrderedSession(FakeSession):
+        async def commit(self) -> None:
+            events.append("commit")
+            await super().commit()
+
+        async def rollback(self) -> None:
+            events.append("rollback")
+            await super().rollback()
+
+    class LostOwnershipService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare")
+            return SimpleNamespace(requires_pre_execution_commit=True)
+
+        async def execute_prepared_publish(self, plan):
+            events.append("execute")
+            raise PublishingExecutionLeaseLostError
+
+    session = OrderedSession()
+    patch_dependencies(monkeypatch, session, LostOwnershipService)
+
+    with pytest.raises(PublishingExecutionLeaseLostError):
+        await task_module._run_publishing(7, execution_owner="task-owner-a")
+
+    assert events == ["prepare", "commit", "execute", "rollback"]
+    assert session.commits == 1
     assert session.rollbacks == 1
 
 
@@ -660,6 +696,32 @@ def test_lease_contention_uses_safe_bounded_retry_without_owner_leak(monkeypatch
 
     retry.assert_called_once_with(exc=error, countdown=5)
     assert "failure_category=lease_contention" in caplog.text
+    assert "retry_after_seconds=5" in caplog.text
+    assert owner not in caplog.text
+
+
+def test_lease_lost_uses_safe_bounded_retry_without_owner_leak(monkeypatch, caplog) -> None:
+    owner = "task-owner-secret-16e"
+    error = PublishingExecutionLeaseLostError()
+
+    async def fail(publish_job_id: int, execution_owner: str | None = None):
+        assert execution_owner == owner
+        raise error
+
+    retry = Mock(side_effect=Retry())
+    caplog.set_level(logging.WARNING, logger="app.tasks.publishing")
+    monkeypatch.setattr(task_module, "_run_publishing", fail)
+    monkeypatch.setattr(task_module.execute_publish, "retry", retry)
+    task_module.execute_publish.push_request(id=owner)
+    try:
+        with pytest.raises(Retry):
+            task_module.execute_publish.run(7)
+    finally:
+        task_module.execute_publish.pop_request()
+
+    retry.assert_called_once_with(exc=error, countdown=5)
+    assert task_module.execute_publish.max_retries == 3
+    assert "failure_category=lease_lost" in caplog.text
     assert "retry_after_seconds=5" in caplog.text
     assert owner not in caplog.text
 

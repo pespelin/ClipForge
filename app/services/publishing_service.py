@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from app.core.exceptions import (
     PublishCancellationConflictError,
     PublishingError,
+    PublishingExecutionLeaseLostError,
     PublishingExecutionLeaseUnavailableError,
     PublishingExecutionOwnerUnavailableError,
     PublishJobCancelledError,
@@ -21,6 +22,7 @@ from app.core.exceptions import (
 from app.models.publish_job import PublishJob, PublishStatus
 from app.models.video_render import VideoRender, VideoRenderStatus
 from app.providers.publishing import (
+    PublishingExecutionGuard,
     PublishingProvider,
     ResumablePublishingProvider,
     ResumablePublishingSession,
@@ -34,6 +36,7 @@ from app.schemas.publish_job import (
     PublishOptions,
     PublishRequest,
 )
+from app.services.publishing_execution_guard import PublishingExecutionLeaseGuard
 from app.services.publishing_upload_session_service import (
     PublishingUploadSessionData,
     PublishingUploadSessionService,
@@ -48,6 +51,7 @@ class PublishingExecutionPlan:
     requires_pre_execution_commit: bool
     checkpoint_created: bool = False
     execution_owner: str | None = None
+    execution_guard: PublishingExecutionGuard | None = None
     already_complete: bool = False
 
 
@@ -61,6 +65,7 @@ class PublishingService:
         execution_owner: str | None = None,
         execution_lease_seconds: int = 900,
         clock: Callable[[], datetime] | None = None,
+        execution_checkpoint: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.video_render_repository = video_render_repository
         self.publish_job_repository = publish_job_repository
@@ -69,6 +74,7 @@ class PublishingService:
         self.execution_owner = execution_owner
         self.execution_lease_seconds = execution_lease_seconds
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.execution_checkpoint = execution_checkpoint
 
     async def create_publish_job(self, video_render_id: int, request: PublishRequest) -> PublishJob:
         validated_request = PublishRequest.model_validate(request)
@@ -185,6 +191,7 @@ class PublishingService:
                     ),
                     requires_pre_execution_commit=True,
                     execution_owner=self.execution_owner,
+                    execution_guard=self._execution_guard(publish_job.id),
                 )
 
             session = await self.publishing_provider.initiate_upload(publishing_input)
@@ -206,6 +213,7 @@ class PublishingService:
                 requires_pre_execution_commit=True,
                 checkpoint_created=True,
                 execution_owner=self.execution_owner,
+                execution_guard=self._execution_guard(publish_job.id),
             )
         except (
             PublishingExecutionLeaseUnavailableError,
@@ -231,7 +239,9 @@ class PublishingService:
                 if not isinstance(self.publishing_provider, ResumablePublishingProvider):
                     raise RuntimeError("Prepared resumable provider capability is unavailable")
                 raw_result = await self.publishing_provider.resume_upload(
-                    plan.publishing_input, plan.resumable_session
+                    plan.publishing_input,
+                    plan.resumable_session,
+                    plan.execution_guard,
                 )
             result = PublishingResult.model_validate(raw_result)
             self._apply_result(publish_job, result)
@@ -243,6 +253,8 @@ class PublishingService:
                     raise RuntimeError("Resumable upload persistence is not composed")
                 await self.upload_session_service.delete_by_publish_job_id(publish_job.id)
             return await self.publish_job_repository.save(publish_job)
+        except PublishingExecutionLeaseLostError:
+            raise
         except Exception as error:
             if plan.resumable_session is not None and plan.execution_owner is not None:
                 if self.upload_session_service is None:
@@ -277,6 +289,22 @@ class PublishingService:
             owner=self.execution_owner,
             now=now,
             lease_expires_at=now + timedelta(seconds=self.execution_lease_seconds),
+        )
+
+    def _execution_guard(self, publish_job_id: int) -> PublishingExecutionGuard:
+        if (
+            self.upload_session_service is None
+            or self.execution_owner is None
+            or self.execution_checkpoint is None
+        ):
+            raise PublishingExecutionOwnerUnavailableError
+        return PublishingExecutionLeaseGuard(
+            upload_session_service=self.upload_session_service,
+            publish_job_id=publish_job_id,
+            execution_owner=self.execution_owner,
+            execution_lease_seconds=self.execution_lease_seconds,
+            clock=self.clock,
+            persist_renewal=self.execution_checkpoint,
         )
 
     async def get_publish_job(self, publish_job_id: int) -> PublishJob:

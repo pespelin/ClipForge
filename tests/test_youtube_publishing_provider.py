@@ -7,7 +7,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from app.core.exceptions import PublishingTransientError
+from app.core.exceptions import PublishingExecutionLeaseLostError, PublishingTransientError
 from app.models.publish_job import PublishPlatform, PublishVisibility
 from app.providers.publishing import (
     PublishingProvider,
@@ -84,6 +84,19 @@ class FakeArtifactReader:
         if self.error is not None:
             raise self.error
         return self.content
+
+
+class FakeExecutionGuard:
+    def __init__(self, events: list[str], *, fail_on_call: int | None = None) -> None:
+        self.events = events
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    async def renew(self) -> None:
+        self.calls += 1
+        self.events.append(f"renew-{self.calls}")
+        if self.calls == self.fail_on_call:
+            raise PublishingExecutionLeaseLostError
 
 
 def make_provider(handler, *, resolver=None, reader=None):
@@ -235,6 +248,59 @@ async def test_existing_session_probes_and_resumes_from_reported_offset_without_
         result = await provider.resume_upload(publishing_input(), session)
     assert [request.method for request in requests] == ["PUT", "PUT"]
     assert result.remote_media_id == VIDEO_ID
+
+
+async def test_execution_guard_renews_before_probe_and_media_put() -> None:
+    events: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers["content-range"] == "bytes */10":
+            events.append("probe")
+            return httpx.Response(308, headers={"Range": "bytes=0-3"})
+        events.append("media")
+        return completed_response()
+
+    provider, client, _, _ = make_provider(handler)
+    guard = FakeExecutionGuard(events)
+    async with client:
+        result = await provider.resume_upload(
+            publishing_input(),
+            YouTubeResumableUploadSession(SESSION_URI, 10),
+            guard,
+        )
+
+    assert result.remote_media_id == VIDEO_ID
+    assert events == ["renew-1", "probe", "renew-2", "media"]
+
+
+@pytest.mark.parametrize(
+    ("fail_on_call", "expected_events"),
+    [
+        (1, ["renew-1"]),
+        (2, ["renew-1", "probe", "renew-2"]),
+    ],
+)
+async def test_renewal_failure_prevents_following_remote_operation(
+    fail_on_call: int,
+    expected_events: list[str],
+) -> None:
+    events: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        events.append("probe" if request.headers["content-range"] == "bytes */10" else "media")
+        return httpx.Response(308, headers={"Range": "bytes=0-3"})
+
+    provider, client, _, _ = make_provider(handler)
+    guard = FakeExecutionGuard(events, fail_on_call=fail_on_call)
+    async with client:
+        with pytest.raises(PublishingExecutionLeaseLostError):
+            await provider.resume_upload(
+                publishing_input(),
+                YouTubeResumableUploadSession(SESSION_URI, 10),
+                guard,
+            )
+
+    assert events == expected_events
 
 
 async def test_existing_session_already_complete_does_not_upload_again() -> None:

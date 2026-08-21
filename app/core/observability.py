@@ -1,6 +1,7 @@
 from app.core.exceptions import (
     PublishingAuthenticationError,
     PublishingError,
+    PublishingExecutionLeaseLostError,
     PublishingExecutionLeaseUnavailableError,
     PublishingExecutionLockUnavailableError,
     PublishingPermanentError,
@@ -16,6 +17,8 @@ def publishing_failure_category(error: BaseException) -> str:
         return "lock_contention"
     if isinstance(error, PublishingExecutionLeaseUnavailableError):
         return "lease_contention"
+    if isinstance(error, PublishingExecutionLeaseLostError):
+        return "lease_lost"
     if isinstance(error, PublishingRateLimitError):
         return "rate_limit"
     if isinstance(error, PublishingTransientError):

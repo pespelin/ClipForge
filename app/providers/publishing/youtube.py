@@ -17,6 +17,7 @@ from app.core.exceptions import (
 )
 from app.models.publish_job import PublishPlatform, PublishVisibility
 from app.providers.publishing.base import (
+    PublishingExecutionGuard,
     PublishingReconciliationInput,
     PublishingReconciliationResult,
     PublishingRemoteState,
@@ -108,10 +109,13 @@ class YouTubePublishingProvider:
         self,
         publishing_input: PublishingInput,
         session: ResumablePublishingSession,
+        execution_guard: PublishingExecutionGuard | None = None,
     ) -> PublishingResult:
         """Probe and continue an existing session without initiating another one."""
         credential, video_bytes = await self._resolve_dependencies(publishing_input)
         self._validate_session(session, len(video_bytes))
+        if execution_guard is not None:
+            await execution_guard.renew()
         progress = await self._query_status(
             session,
             credential.access_token,
@@ -126,6 +130,8 @@ class YouTubePublishingProvider:
             total_bytes=session.total_bytes,
             next_byte_offset=progress.next_byte_offset,
         )
+        if execution_guard is not None:
+            await execution_guard.renew()
         progress = await self._upload_media(
             resumed_session,
             video_bytes,

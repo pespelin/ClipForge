@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.core.exceptions import (
+    PublishingExecutionLeaseLostError,
     PublishingExecutionLeaseUnavailableError,
     PublishingUploadSessionNotFoundError,
 )
@@ -106,6 +107,28 @@ class PublishingUploadSessionService:
         upload_session.execution_lease_expires_at = None
         await self.repository.save(upload_session)
         return True
+
+    async def renew_execution_lease(
+        self,
+        publish_job_id: int,
+        *,
+        owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> PublishingUploadSession:
+        self._validate_lease_values(owner, now, lease_expires_at)
+        upload_session = await self.repository.get_by_publish_job_id(publish_job_id)
+        if upload_session is None:
+            raise PublishingUploadSessionNotFoundError
+        if (
+            upload_session.execution_owner != owner
+            or upload_session.execution_lease_expires_at is None
+            or upload_session.execution_lease_expires_at <= now
+        ):
+            raise PublishingExecutionLeaseLostError
+
+        upload_session.execution_lease_expires_at = lease_expires_at
+        return await self.repository.save(upload_session)
 
     async def is_execution_lease_active(
         self,

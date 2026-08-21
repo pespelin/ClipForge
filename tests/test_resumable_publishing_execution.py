@@ -4,6 +4,7 @@ import pytest
 
 from app.core.exceptions import (
     PublishingError,
+    PublishingExecutionLeaseLostError,
     PublishingExecutionLeaseUnavailableError,
     PublishingExecutionLockUnavailableError,
     PublishingTransientError,
@@ -107,6 +108,24 @@ class FakeUploadSessionService:
         self.execution_lease_expires_at = None
         return True
 
+    async def renew_execution_lease(
+        self,
+        publish_job_id: int,
+        *,
+        owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ):
+        self.events.append("lease_renew")
+        if (
+            self.execution_owner != owner
+            or self.execution_lease_expires_at is None
+            or self.execution_lease_expires_at <= now
+        ):
+            raise PublishingExecutionLeaseLostError
+        self.execution_lease_expires_at = lease_expires_at
+        return object()
+
 
 class FakeResumableProvider:
     def __init__(self, events=None) -> None:
@@ -130,7 +149,11 @@ class FakeResumableProvider:
         self,
         publishing_input: PublishingInput,
         session: ResumablePublishingSession,
+        execution_guard=None,
     ):
+        if execution_guard is not None:
+            await execution_guard.renew()
+        self.events.append("media")
         self.resumed.append((publishing_input, session))
         if self.error is not None:
             raise self.error
@@ -180,6 +203,10 @@ def make_service(job=None, checkpoint=None, *, owner="task-owner-a"):
     repository = FakeRepository(job or publish_job(), events)
     provider = FakeResumableProvider(events)
     sessions = FakeUploadSessionService(checkpoint, events)
+
+    async def persist_renewal() -> None:
+        events.append("renewal_commit")
+
     service = PublishingService(
         object(),
         repository,
@@ -188,6 +215,7 @@ def make_service(job=None, checkpoint=None, *, owner="task-owner-a"):
         execution_owner=owner,
         execution_lease_seconds=900,
         clock=lambda: NOW,
+        execution_checkpoint=persist_renewal,
     )
     return service, repository, provider, sessions
 
@@ -354,6 +382,23 @@ async def test_provider_failure_marks_failed_but_retains_checkpoint() -> None:
     assert sessions.checkpoint is checkpoint
     assert sessions.execution_owner is None
     assert plan.publish_job.status is PublishStatus.FAILED
+
+
+async def test_old_worker_stops_when_new_owner_has_taken_over() -> None:
+    checkpoint = PublishingUploadSessionData(7, PublishPlatform.YOUTUBE, SESSION_URI, 4096)
+    service, repository, provider, sessions = make_service(checkpoint=checkpoint)
+    plan = await service.prepare_publish_job_execution(7)
+    sessions.execution_owner = "task-owner-b"
+    sessions.execution_lease_expires_at = NOW + timedelta(seconds=900)
+
+    with pytest.raises(PublishingExecutionLeaseLostError):
+        await service.execute_prepared_publish(plan)
+
+    assert provider.resumed == []
+    assert sessions.execution_owner == "task-owner-b"
+    assert sessions.deleted == []
+    assert plan.publish_job.status is PublishStatus.PUBLISHING
+    assert repository.events[-1] == "lease_renew"
 
 
 async def test_transient_failure_retains_checkpoint_and_retry_classification() -> None:

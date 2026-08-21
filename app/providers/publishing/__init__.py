@@ -1,4 +1,5 @@
 from app.providers.publishing.base import (
+    PublishingExecutionGuard,
     PublishingProvider,
     PublishingReconciliationInput,
     PublishingReconciliationProvider,
@@ -45,6 +46,7 @@ __all__ = [
     "PublishingAccessCredential",
     "PublishingArtifactReader",
     "PublishingCredentialResolver",
+    "PublishingExecutionGuard",
     "PublishingCredentialResolutionError",
     "PublishingComposition",
     "PublishingProvider",

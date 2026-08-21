@@ -23,6 +23,12 @@ class ResumablePublishingSession:
     next_byte_offset: int = 0
 
 
+class PublishingExecutionGuard(Protocol):
+    """Provider-neutral capability for renewing durable execution ownership."""
+
+    async def renew(self) -> None: ...
+
+
 @runtime_checkable
 class ResumablePublishingProvider(Protocol):
     """Optional publishing capability for checkpointed resumable uploads."""
@@ -35,6 +41,7 @@ class ResumablePublishingProvider(Protocol):
         self,
         publishing_input: PublishingInput,
         session: ResumablePublishingSession,
+        execution_guard: PublishingExecutionGuard | None = None,
     ) -> PublishingResult: ...
 
 

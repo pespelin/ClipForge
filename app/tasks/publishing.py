@@ -8,6 +8,7 @@ from sqlalchemy.exc import OperationalError
 from app.core.config import get_settings
 from app.core.exceptions import (
     PublishingError,
+    PublishingExecutionLeaseLostError,
     PublishingExecutionLeaseUnavailableError,
     PublishingExecutionLockUnavailableError,
     PublishingExecutionOwnerUnavailableError,
@@ -42,6 +43,10 @@ async def _run_publishing(
             session=session if http_client is not None else None,
             http_client=http_client,
         )
+
+        async def persist_execution_renewal() -> None:
+            await session.commit()
+
         service = PublishingService(
             video_render_repository=VideoRenderRepository(session),
             publish_job_repository=PublishJobRepository(session),
@@ -49,6 +54,7 @@ async def _run_publishing(
             upload_session_service=composition.upload_session_service,
             execution_owner=execution_owner,
             execution_lease_seconds=settings.publishing_execution_lease_seconds,
+            execution_checkpoint=persist_execution_renewal,
         )
         try:
             plan = await service.prepare_publish_job_execution(publish_job_id)
@@ -73,6 +79,7 @@ async def _run_publishing(
             await session.commit()
         except (
             PublishingExecutionLeaseUnavailableError,
+            PublishingExecutionLeaseLostError,
             PublishingExecutionLockUnavailableError,
             PublishingExecutionOwnerUnavailableError,
         ):
@@ -118,6 +125,13 @@ def execute_publish(self, publish_job_id: int) -> dict[str, int | str | None]:
         logger.warning(
             "publishing.execution.retry_scheduled publish_job_id=%s "
             "failure_category=lease_contention retry_after_seconds=5",
+            publish_job_id,
+        )
+        raise self.retry(exc=error, countdown=5) from error
+    except PublishingExecutionLeaseLostError as error:
+        logger.warning(
+            "publishing.execution.retry_scheduled publish_job_id=%s "
+            "failure_category=lease_lost retry_after_seconds=5",
             publish_job_id,
         )
         raise self.retry(exc=error, countdown=5) from error
