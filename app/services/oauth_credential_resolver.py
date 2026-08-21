@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -20,6 +21,8 @@ from app.providers.oauth import (
 )
 from app.security import CredentialEncryptionError
 from app.services.oauth_credential_service import OAuthCredentialInput, OAuthCredentialService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,19 +66,49 @@ class OAuthCredentialResolver:
                 scope=credential.scope,
             )
         if credential.refresh_token is None:
+            logger.warning(
+                "oauth.credential.reconnect_required publishing_account_id=%s "
+                "failure_category=refresh_unavailable",
+                publishing_account_id,
+            )
             raise OAuthCredentialRefreshUnavailableError
 
+        logger.info(
+            "oauth.credential.refresh_started publishing_account_id=%s",
+            publishing_account_id,
+        )
         try:
             refreshed = await self._refresh_provider.refresh_token(
                 refresh_token=credential.refresh_token
             )
         except OAuthTokenRefreshRateLimitError as error:
+            logger.warning(
+                "oauth.credential.refresh_failed publishing_account_id=%s "
+                "failure_category=rate_limit retry_after_seconds=%s",
+                publishing_account_id,
+                error.retry_after_seconds,
+            )
             raise PublishingRateLimitError(retry_after_seconds=error.retry_after_seconds) from None
         except OAuthTokenRefreshAuthenticationError:
+            logger.warning(
+                "oauth.credential.reconnect_required publishing_account_id=%s "
+                "failure_category=authentication",
+                publishing_account_id,
+            )
             raise PublishingAuthenticationError from None
         except OAuthTokenRefreshTransientError:
+            logger.warning(
+                "oauth.credential.refresh_failed publishing_account_id=%s "
+                "failure_category=transient",
+                publishing_account_id,
+            )
             raise PublishingTransientError from None
         except OAuthTokenRefreshError:
+            logger.error(
+                "oauth.credential.refresh_failed publishing_account_id=%s "
+                "failure_category=provider",
+                publishing_account_id,
+            )
             raise OAuthCredentialRefreshFailedError from None
 
         expires_at = (
@@ -97,7 +130,16 @@ class OAuthCredentialResolver:
                 ),
             )
         except CredentialEncryptionError:
+            logger.error(
+                "oauth.credential.refresh_failed publishing_account_id=%s "
+                "failure_category=persistence",
+                publishing_account_id,
+            )
             raise OAuthCredentialPersistenceError from None
+        logger.info(
+            "oauth.credential.refresh_succeeded publishing_account_id=%s",
+            publishing_account_id,
+        )
         return ResolvedOAuthCredential(
             access_token=refreshed.access_token,
             token_type=token_type,

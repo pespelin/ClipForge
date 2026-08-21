@@ -1,4 +1,5 @@
 import inspect
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -166,8 +167,9 @@ async def test_youtube_task_composes_managed_http_and_checkpoint_dependencies(
 
 
 async def test_resumable_checkpoint_commit_precedes_execute_and_final_commit(
-    monkeypatch,
+    monkeypatch, caplog
 ) -> None:
+    caplog.set_level(logging.INFO, logger="app.tasks.publishing")
     events = []
 
     class OrderedSession(FakeSession):
@@ -198,6 +200,7 @@ async def test_resumable_checkpoint_commit_precedes_execute_and_final_commit(
 
     assert events == ["prepare", "commit", "execute", "commit"]
     assert session.commits == 2
+    assert "publishing.execution.checkpoint_created publish_job_id=7" in caplog.text
 
 
 async def test_checkpoint_commit_failure_prevents_media_execution(monkeypatch) -> None:
@@ -297,7 +300,9 @@ async def test_provider_failure_after_checkpoint_commits_failed_state(monkeypatc
     assert session.rollbacks == 0
 
 
-def test_sync_entrypoint_runs_async_helper_and_is_registered(monkeypatch) -> None:
+def test_sync_entrypoint_runs_async_helper_and_is_registered(monkeypatch, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.tasks.publishing")
+
     async def fake_run(publish_job_id: int) -> dict[str, int | str | None]:
         return {
             "publish_job_id": publish_job_id,
@@ -311,6 +316,8 @@ def test_sync_entrypoint_runs_async_helper_and_is_registered(monkeypatch) -> Non
     assert task_module.execute_publish.name == "publish.execute"
     assert task_module.celery_app.tasks["publish.execute"].name == "publish.execute"
     assert "app.tasks.publishing" in task_module.celery_app.conf.include
+    assert "publishing.execution.started publish_job_id=7" in caplog.text
+    assert "publishing.execution.succeeded publish_job_id=7 status=published" in caplog.text
 
 
 async def test_publishing_error_commits_failed_state_and_reraises(monkeypatch) -> None:
@@ -541,8 +548,10 @@ def test_operational_error_uses_bounded_celery_retry(monkeypatch) -> None:
     ],
 )
 def test_retryable_publishing_errors_use_bounded_celery_retry(
-    monkeypatch, error, expected_countdown
+    monkeypatch, caplog, error, expected_countdown
 ) -> None:
+    caplog.set_level(logging.WARNING, logger="app.tasks.publishing")
+
     async def fail(publish_job_id: int):
         raise error
 
@@ -555,17 +564,25 @@ def test_retryable_publishing_errors_use_bounded_celery_retry(
 
     retry.assert_called_once_with(exc=error, countdown=expected_countdown)
     assert task_module.execute_publish.max_retries == 3
+    category = "rate_limit" if isinstance(error, PublishingRateLimitError) else "transient"
+    assert "publishing.execution.retry_scheduled publish_job_id=7" in caplog.text
+    assert f"failure_category={category}" in caplog.text
+    assert f"retry_after_seconds={expected_countdown}" in caplog.text
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected_category"),
     [
-        PublishingQuotaExceededError(),
-        PublishingAuthenticationError(),
-        PublishingPermanentError(),
+        (PublishingQuotaExceededError(), "quota"),
+        (PublishingAuthenticationError(), "authentication"),
+        (PublishingPermanentError(), "permanent"),
     ],
 )
-def test_non_retryable_publishing_errors_do_not_auto_retry(monkeypatch, error) -> None:
+def test_non_retryable_publishing_errors_do_not_auto_retry(
+    monkeypatch, caplog, error, expected_category
+) -> None:
+    caplog.set_level(logging.ERROR, logger="app.tasks.publishing")
+
     async def fail(publish_job_id: int):
         raise error
 
@@ -577,6 +594,40 @@ def test_non_retryable_publishing_errors_do_not_auto_retry(monkeypatch, error) -
         task_module.execute_publish.run(7)
 
     retry.assert_not_called()
+    assert "publishing.execution.failed publish_job_id=7" in caplog.text
+    assert f"failure_category={expected_category}" in caplog.text
+
+
+def test_resumed_checkpoint_event_does_not_leak_session_or_storage(monkeypatch, caplog) -> None:
+    session_secret = "SESSION_SECRET_URI_15C"
+    storage_secret = "STORAGE_SECRET_15C"
+    caplog.set_level(logging.INFO, logger="app.tasks.publishing")
+
+    class FakeService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            return SimpleNamespace(
+                requires_checkpoint_commit=False,
+                resumable_session=SimpleNamespace(session_uri=session_secret),
+            )
+
+        async def execute_prepared_publish(self, plan):
+            return SimpleNamespace(
+                id=7,
+                status=PublishStatus.PUBLISHED,
+                remote_media_id="youtube-123",
+                source_storage_key=storage_secret,
+            )
+
+    patch_dependencies(monkeypatch, FakeSession(), FakeService)
+
+    task_module.execute_publish.run(7)
+
+    assert "publishing.execution.resumed publish_job_id=7" in caplog.text
+    assert session_secret not in caplog.text
+    assert storage_secret not in caplog.text
 
 
 def test_task_contains_only_composition_and_transaction_boundary() -> None:

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import AsyncExitStack
 
 import httpx
@@ -10,12 +11,15 @@ from app.core.exceptions import (
     PublishingRateLimitError,
     PublishingTransientError,
 )
+from app.core.observability import publishing_failure_category
 from app.db.session import AsyncSessionLocal
 from app.providers.publishing import create_publishing_composition
 from app.repositories.publish_job_repository import PublishJobRepository
 from app.repositories.video_render_repository import VideoRenderRepository
 from app.services.publishing_service import PublishingService
 from app.workers.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 
 async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
@@ -42,6 +46,15 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
             plan = await service.prepare_publish_job_execution(publish_job_id)
             if plan.requires_checkpoint_commit:
                 await session.commit()
+                logger.info(
+                    "publishing.execution.checkpoint_created publish_job_id=%s",
+                    publish_job_id,
+                )
+            elif getattr(plan, "resumable_session", None) is not None:
+                logger.info(
+                    "publishing.execution.resumed publish_job_id=%s",
+                    publish_job_id,
+                )
             publish_job = await service.execute_prepared_publish(plan)
             await session.commit()
         except PublishingError:
@@ -66,13 +79,51 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
 )
 def execute_publish(self, publish_job_id: int) -> dict[str, int | str | None]:
     """Compose publishing dependencies and run async orchestration."""
+    logger.info("publishing.execution.started publish_job_id=%s", publish_job_id)
     try:
-        return asyncio.run(_run_publishing(publish_job_id))
+        result = asyncio.run(_run_publishing(publish_job_id))
+        logger.info(
+            "publishing.execution.succeeded publish_job_id=%s status=%s",
+            publish_job_id,
+            result["publish_status"],
+        )
+        return result
     except PublishingRateLimitError as error:
         countdown = error.retry_after_seconds
+        retry_countdown = countdown if countdown is not None else 5
+        logger.warning(
+            "publishing.execution.retry_scheduled publish_job_id=%s "
+            "failure_category=rate_limit retry_after_seconds=%s",
+            publish_job_id,
+            retry_countdown,
+        )
         raise self.retry(
             exc=error,
-            countdown=countdown if countdown is not None else 5,
+            countdown=retry_countdown,
         ) from error
     except PublishingTransientError as error:
+        logger.warning(
+            "publishing.execution.retry_scheduled publish_job_id=%s "
+            "failure_category=transient retry_after_seconds=5",
+            publish_job_id,
+        )
         raise self.retry(exc=error, countdown=5) from error
+    except OperationalError:
+        logger.warning(
+            "publishing.execution.retry_scheduled publish_job_id=%s failure_category=database",
+            publish_job_id,
+        )
+        raise
+    except PublishingError as error:
+        logger.error(
+            "publishing.execution.failed publish_job_id=%s failure_category=%s",
+            publish_job_id,
+            publishing_failure_category(error),
+        )
+        raise
+    except Exception:
+        logger.error(
+            "publishing.execution.failed publish_job_id=%s failure_category=unexpected",
+            publish_job_id,
+        )
+        raise

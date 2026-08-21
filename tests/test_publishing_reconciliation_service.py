@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -184,7 +185,8 @@ async def test_no_remote_reference_returns_unknown_without_provider_call() -> No
 
 
 @pytest.mark.parametrize("status", [PublishStatus.FAILED, PublishStatus.PUBLISHING])
-async def test_remote_completion_recovers_job_and_deletes_checkpoint(status) -> None:
+async def test_remote_completion_recovers_job_and_deletes_checkpoint(status, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.publishing_reconciliation_service")
     result = PublishingReconciliationResult(
         PublishingRemoteState.PUBLISHED,
         published_result(),
@@ -204,9 +206,14 @@ async def test_remote_completion_recovers_job_and_deletes_checkpoint(status) -> 
     assert row.provider_metadata == {"provider": "youtube", "reconciled": True}
     assert sessions.deleted == [7]
     assert repository.saved == [row]
+    assert "publishing.reconciliation.started publish_job_id=7" in caplog.text
+    assert "publishing.reconciliation.published_recovered publish_job_id=7" in caplog.text
+    assert SESSION_URI not in caplog.text
+    assert "channel-main" not in caplog.text
 
 
-async def test_incomplete_upload_updates_offset_and_retains_checkpoint() -> None:
+async def test_incomplete_upload_updates_offset_and_retains_checkpoint(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.publishing_reconciliation_service")
     result = PublishingReconciliationResult(
         PublishingRemoteState.INCOMPLETE,
         next_byte_offset=2048,
@@ -219,12 +226,18 @@ async def test_incomplete_upload_updates_offset_and_retains_checkpoint() -> None
     assert sessions.deleted == []
     assert sessions.stored[0].next_byte_offset == 2048
     assert repository.saved == []
+    assert "publishing.reconciliation.incomplete publish_job_id=7" in caplog.text
+    assert "remote_state=incomplete" in caplog.text
+    assert SESSION_URI not in caplog.text
 
 
 @pytest.mark.parametrize(
     "remote_state", [PublishingRemoteState.NOT_FOUND, PublishingRemoteState.UNKNOWN]
 )
-async def test_not_found_or_unknown_preserves_local_state_and_checkpoint(remote_state) -> None:
+async def test_not_found_or_unknown_preserves_local_state_and_checkpoint(
+    remote_state, caplog
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.publishing_reconciliation_service")
     row = publish_job()
     result = PublishingReconciliationResult(remote_state)
     service, repository, _, sessions = make_service(row, checkpoint(100), result)
@@ -234,9 +247,13 @@ async def test_not_found_or_unknown_preserves_local_state_and_checkpoint(remote_
     assert sessions.checkpoint is not None
     assert sessions.deleted == []
     assert repository.saved == []
+    event = "not_found" if remote_state is PublishingRemoteState.NOT_FOUND else "unknown"
+    assert f"publishing.reconciliation.{event} publish_job_id=7" in caplog.text
+    assert SESSION_URI not in caplog.text
 
 
-async def test_transient_provider_failure_has_no_destructive_local_mutation() -> None:
+async def test_transient_provider_failure_has_no_destructive_local_mutation(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.publishing_reconciliation_service")
     row = publish_job()
     error = PublishingTransientError()
     service, repository, _, sessions = make_service(row, checkpoint(100), error=error)
@@ -247,6 +264,9 @@ async def test_transient_provider_failure_has_no_destructive_local_mutation() ->
     assert sessions.deleted == []
     assert sessions.stored == []
     assert repository.saved == []
+    assert "publishing.reconciliation.failed publish_job_id=7" in caplog.text
+    assert "failure_category=transient" in caplog.text
+    assert SESSION_URI not in caplog.text
 
 
 def test_outcome_and_input_repr_do_not_expose_session_uri() -> None:

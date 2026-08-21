@@ -1,9 +1,11 @@
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from app.core.exceptions import PublishJobNotFoundError
+from app.core.observability import publishing_failure_category
 from app.models.publish_job import PublishJob, PublishStatus
 from app.providers.publishing import (
     PublishingReconciliationInput,
@@ -17,6 +19,8 @@ from app.services.publishing_upload_session_service import (
     PublishingUploadSessionData,
     PublishingUploadSessionService,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +44,13 @@ class PublishingReconciliationService:
         self.upload_session_service = upload_session_service
 
     async def reconcile(self, publish_job_id: int) -> PublishingReconciliationOutcome:
+        logger.info("publishing.reconciliation.started publish_job_id=%s", publish_job_id)
         publish_job = await self.publish_job_repository.get(publish_job_id)
         if publish_job is None:
+            logger.warning(
+                "publishing.reconciliation.failed publish_job_id=%s failure_category=not_found",
+                publish_job_id,
+            )
             raise PublishJobNotFoundError
         if publish_job.status in {
             PublishStatus.PUBLISHED,
@@ -61,15 +70,23 @@ class PublishingReconciliationService:
                 PublishingRemoteState.UNKNOWN,
                 False,
             )
-        result = await self.reconciliation_provider.reconcile(
-            PublishingReconciliationInput(
-                platform=publish_job.platform,
-                account_reference=publish_job.account_reference,
-                visibility=publish_job.visibility,
-                remote_media_id=publish_job.remote_media_id,
-                resumable_session=self._session(checkpoint),
+        try:
+            result = await self.reconciliation_provider.reconcile(
+                PublishingReconciliationInput(
+                    platform=publish_job.platform,
+                    account_reference=publish_job.account_reference,
+                    visibility=publish_job.visibility,
+                    remote_media_id=publish_job.remote_media_id,
+                    resumable_session=self._session(checkpoint),
+                )
             )
-        )
+        except Exception as error:
+            logger.warning(
+                "publishing.reconciliation.failed publish_job_id=%s failure_category=%s",
+                publish_job_id,
+                publishing_failure_category(error),
+            )
+            raise
         if result.remote_state is PublishingRemoteState.PUBLISHED:
             if result.publishing_result is None:
                 return PublishingReconciliationOutcome(publish_job, result.remote_state, False)
@@ -79,6 +96,10 @@ class PublishingReconciliationService:
             publish_job.error_message = None
             await self.upload_session_service.delete_by_publish_job_id(publish_job.id)
             await self.publish_job_repository.save(publish_job)
+            logger.info(
+                "publishing.reconciliation.published_recovered publish_job_id=%s",
+                publish_job_id,
+            )
             return PublishingReconciliationOutcome(publish_job, result.remote_state, True)
         if (
             result.remote_state is PublishingRemoteState.INCOMPLETE
@@ -95,7 +116,28 @@ class PublishingReconciliationService:
                     next_byte_offset=result.next_byte_offset,
                 )
             )
+            logger.warning(
+                "publishing.reconciliation.incomplete publish_job_id=%s "
+                "remote_state=incomplete checkpoint_updated=true",
+                publish_job_id,
+            )
             return PublishingReconciliationOutcome(publish_job, result.remote_state, True)
+        if result.remote_state is PublishingRemoteState.INCOMPLETE:
+            logger.warning(
+                "publishing.reconciliation.incomplete publish_job_id=%s "
+                "remote_state=incomplete checkpoint_updated=false",
+                publish_job_id,
+            )
+        elif result.remote_state is PublishingRemoteState.NOT_FOUND:
+            logger.warning(
+                "publishing.reconciliation.not_found publish_job_id=%s remote_state=not_found",
+                publish_job_id,
+            )
+        elif result.remote_state is PublishingRemoteState.UNKNOWN:
+            logger.info(
+                "publishing.reconciliation.unknown publish_job_id=%s remote_state=unknown",
+                publish_job_id,
+            )
         return PublishingReconciliationOutcome(publish_job, result.remote_state, False)
 
     @staticmethod

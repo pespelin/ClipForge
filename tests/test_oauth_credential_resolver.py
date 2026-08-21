@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -110,6 +111,15 @@ async def test_valid_or_unknown_expiry_returns_existing_token_without_refresh(ex
     assert ACCESS_TOKEN not in repr(result)
 
 
+async def test_valid_token_does_not_emit_refresh_lifecycle_logs(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.oauth_credential_resolver")
+    resolver, _ = make_resolver(FakeCredentialService(credential()))
+
+    await resolver.resolve(7)
+
+    assert "oauth.credential.refresh_" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "expires_at",
     [NOW - timedelta(seconds=1), NOW, NOW + timedelta(seconds=60)],
@@ -159,6 +169,26 @@ async def test_refresh_persists_rotation_expiry_and_preserves_missing_metadata()
     assert persisted.expires_at == NOW + timedelta(minutes=30)
     assert result.token_type == "Bearer"
     assert result.scope == "youtube.upload"
+
+
+async def test_refresh_success_events_are_secret_safe(caplog) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.oauth_credential_resolver")
+    credentials = FakeCredentialService(credential(expires_at=NOW))
+    provider = FakeRefreshProvider(
+        OAuthTokenResult(
+            access_token="ACCESS_SECRET_15C",
+            refresh_token="REFRESH_SECRET_15C",
+            expires_in=3600,
+        )
+    )
+    resolver, _ = make_resolver(credentials, provider)
+
+    await resolver.resolve(7)
+
+    assert "oauth.credential.refresh_started publishing_account_id=7" in caplog.text
+    assert "oauth.credential.refresh_succeeded publishing_account_id=7" in caplog.text
+    assert "ACCESS_SECRET_15C" not in caplog.text
+    assert "REFRESH_SECRET_15C" not in caplog.text
 
 
 async def test_missing_rotated_refresh_token_is_forwarded_as_none_for_preservation() -> None:
@@ -231,8 +261,9 @@ def test_resolved_credential_repr_hides_access_token() -> None:
     ],
 )
 async def test_refresh_classification_propagates_safely_without_persistence(
-    provider_error, expected_error, retry_after
+    caplog, provider_error, expected_error, retry_after
 ) -> None:
+    caplog.set_level(logging.INFO, logger="app.services.oauth_credential_resolver")
     credentials = FakeCredentialService(credential(expires_at=NOW))
     resolver, _ = make_resolver(
         credentials,
@@ -246,3 +277,11 @@ async def test_refresh_classification_propagates_safely_without_persistence(
     assert REFRESH_TOKEN not in repr(error.value)
     if isinstance(error.value, PublishingTransientError):
         assert error.value.retry_after_seconds == retry_after
+    expected_event = (
+        "oauth.credential.reconnect_required"
+        if isinstance(provider_error, OAuthTokenRefreshAuthenticationError)
+        else "oauth.credential.refresh_failed"
+    )
+    assert expected_event in caplog.text
+    assert ACCESS_TOKEN not in caplog.text
+    assert REFRESH_TOKEN not in caplog.text
