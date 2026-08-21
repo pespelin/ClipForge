@@ -1,9 +1,10 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.core.exceptions import (
     PublishingError,
+    PublishingExecutionLeaseUnavailableError,
     PublishingExecutionLockUnavailableError,
     PublishingTransientError,
 )
@@ -14,6 +15,7 @@ from app.services.publishing_service import PublishingService
 from app.services.publishing_upload_session_service import PublishingUploadSessionData
 
 SESSION_URI = "https://upload.youtube.test/secret-session-capability"
+NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 
 class FakeRepository:
@@ -53,6 +55,8 @@ class FakeUploadSessionService:
         self.deleted = []
         self.events = events if events is not None else []
         self.store_error: Exception | None = None
+        self.execution_owner: str | None = None
+        self.execution_lease_expires_at: datetime | None = None
 
     async def get_by_publish_job_id(self, publish_job_id: int):
         self.events.append("checkpoint_lookup")
@@ -71,6 +75,36 @@ class FakeUploadSessionService:
     async def delete_by_publish_job_id(self, publish_job_id: int):
         self.deleted.append(publish_job_id)
         self.checkpoint = None
+        self.execution_owner = None
+        self.execution_lease_expires_at = None
+        return True
+
+    async def acquire_execution_lease(
+        self,
+        publish_job_id: int,
+        *,
+        owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ):
+        self.events.append("lease_acquire")
+        if (
+            self.execution_owner is not None
+            and self.execution_owner != owner
+            and self.execution_lease_expires_at is not None
+            and self.execution_lease_expires_at > now
+        ):
+            raise PublishingExecutionLeaseUnavailableError
+        self.execution_owner = owner
+        self.execution_lease_expires_at = lease_expires_at
+        return object()
+
+    async def release_execution_lease(self, publish_job_id: int, *, owner: str):
+        self.events.append("lease_release")
+        if self.execution_owner != owner:
+            return False
+        self.execution_owner = None
+        self.execution_lease_expires_at = None
         return True
 
 
@@ -141,12 +175,20 @@ def publish_job(status=PublishStatus.PENDING) -> PublishJob:
     )
 
 
-def make_service(job=None, checkpoint=None):
+def make_service(job=None, checkpoint=None, *, owner="task-owner-a"):
     events = []
     repository = FakeRepository(job or publish_job(), events)
     provider = FakeResumableProvider(events)
     sessions = FakeUploadSessionService(checkpoint, events)
-    service = PublishingService(object(), repository, provider, sessions)
+    service = PublishingService(
+        object(),
+        repository,
+        provider,
+        sessions,
+        execution_owner=owner,
+        execution_lease_seconds=900,
+        clock=lambda: NOW,
+    )
     return service, repository, provider, sessions
 
 
@@ -159,11 +201,12 @@ async def test_new_session_prepare_stores_checkpoint_without_media_transfer() ->
     assert plan.checkpoint_created is True
     assert repository.locked_gets == [7]
     assert repository.normal_gets == []
-    assert repository.events[:4] == [
+    assert repository.events[:5] == [
         "lock",
         "checkpoint_lookup",
         "initiate",
         "checkpoint_store",
+        "lease_acquire",
     ]
     assert len(provider.initiated) == 1
     assert provider.resumed == []
@@ -173,6 +216,8 @@ async def test_new_session_prepare_stores_checkpoint_without_media_transfer() ->
     assert checkpoint.platform is PublishPlatform.YOUTUBE
     assert checkpoint.session_uri == SESSION_URI
     assert checkpoint.total_bytes == 4096
+    assert sessions.execution_owner == "task-owner-a"
+    assert sessions.execution_lease_expires_at == NOW + timedelta(seconds=900)
 
 
 async def test_lock_contention_does_not_mutate_job_checkpoint_or_provider() -> None:
@@ -206,10 +251,46 @@ async def test_existing_checkpoint_is_reused_without_new_initiation() -> None:
     assert plan.checkpoint_created is False
     assert repository.locked_gets == [7]
     assert repository.normal_gets == []
-    assert repository.events[:2] == ["lock", "checkpoint_lookup"]
+    assert repository.events[:3] == ["lock", "checkpoint_lookup", "lease_acquire"]
     assert provider.initiated == []
     assert sessions.stored == []
     assert plan.resumable_session.next_byte_offset == 1024
+
+
+async def test_active_other_owner_lease_blocks_media_without_job_mutation() -> None:
+    checkpoint = PublishingUploadSessionData(7, PublishPlatform.YOUTUBE, SESSION_URI, 4096, 1024)
+    service, repository, provider, sessions = make_service(
+        checkpoint=checkpoint,
+        owner="task-owner-b",
+    )
+    sessions.execution_owner = "task-owner-a"
+    sessions.execution_lease_expires_at = NOW + timedelta(seconds=60)
+
+    with pytest.raises(PublishingExecutionLeaseUnavailableError):
+        await service.prepare_publish_job_execution(7)
+
+    assert repository.row.status is PublishStatus.PENDING
+    assert repository.saved_statuses == []
+    assert repository.events == ["lock", "checkpoint_lookup", "lease_acquire"]
+    assert provider.initiated == []
+    assert provider.resumed == []
+    assert sessions.execution_owner == "task-owner-a"
+
+
+async def test_expired_lease_allows_new_owner_to_resume() -> None:
+    checkpoint = PublishingUploadSessionData(7, PublishPlatform.YOUTUBE, SESSION_URI, 4096, 1024)
+    service, _, provider, sessions = make_service(
+        checkpoint=checkpoint,
+        owner="task-owner-b",
+    )
+    sessions.execution_owner = "task-owner-a"
+    sessions.execution_lease_expires_at = NOW
+
+    plan = await service.prepare_publish_job_execution(7)
+
+    assert plan.execution_owner == "task-owner-b"
+    assert sessions.execution_owner == "task-owner-b"
+    assert provider.initiated == []
 
 
 async def test_initiation_failure_does_not_store_checkpoint_or_transfer_media() -> None:
@@ -251,6 +332,7 @@ async def test_execute_resumes_applies_result_and_cleans_checkpoint() -> None:
     assert provider.resumed[0][1].session_uri == SESSION_URI
     assert provider.resumed[0][1].next_byte_offset == 1024
     assert sessions.deleted == [7]
+    assert sessions.execution_owner is None
     assert job.status is PublishStatus.PUBLISHED
     assert job.remote_media_id == "youtube-123"
     assert repository.saved_statuses == [
@@ -270,6 +352,7 @@ async def test_provider_failure_marks_failed_but_retains_checkpoint() -> None:
 
     assert sessions.deleted == []
     assert sessions.checkpoint is checkpoint
+    assert sessions.execution_owner is None
     assert plan.publish_job.status is PublishStatus.FAILED
 
 
@@ -284,6 +367,7 @@ async def test_transient_failure_retains_checkpoint_and_retry_classification() -
 
     assert sessions.deleted == []
     assert sessions.checkpoint is checkpoint
+    assert sessions.execution_owner is None
     assert plan.publish_job.status is PublishStatus.FAILED
 
 

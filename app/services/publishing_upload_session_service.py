@@ -1,5 +1,10 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 
+from app.core.exceptions import (
+    PublishingExecutionLeaseUnavailableError,
+    PublishingUploadSessionNotFoundError,
+)
 from app.models.publish_job import PublishPlatform
 from app.models.publishing_upload_session import PublishingUploadSession
 from app.repositories.publishing_upload_session_repository import (
@@ -66,3 +71,55 @@ class PublishingUploadSessionService:
             return False
         await self.repository.delete(upload_session)
         return True
+
+    async def acquire_execution_lease(
+        self,
+        publish_job_id: int,
+        *,
+        owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> PublishingUploadSession:
+        self._validate_lease_values(owner, now, lease_expires_at)
+        upload_session = await self.repository.get_by_publish_job_id(publish_job_id)
+        if upload_session is None:
+            raise PublishingUploadSessionNotFoundError
+
+        active_other_owner = (
+            upload_session.execution_owner is not None
+            and upload_session.execution_owner != owner
+            and upload_session.execution_lease_expires_at is not None
+            and upload_session.execution_lease_expires_at > now
+        )
+        if active_other_owner:
+            raise PublishingExecutionLeaseUnavailableError
+
+        upload_session.execution_owner = owner
+        upload_session.execution_lease_expires_at = lease_expires_at
+        return await self.repository.save(upload_session)
+
+    async def release_execution_lease(self, publish_job_id: int, *, owner: str) -> bool:
+        upload_session = await self.repository.get_by_publish_job_id(publish_job_id)
+        if upload_session is None or upload_session.execution_owner != owner:
+            return False
+        upload_session.execution_owner = None
+        upload_session.execution_lease_expires_at = None
+        await self.repository.save(upload_session)
+        return True
+
+    @staticmethod
+    def _validate_lease_values(
+        owner: str,
+        now: datetime,
+        lease_expires_at: datetime,
+    ) -> None:
+        if not owner or len(owner) > 255:
+            raise ValueError("Execution owner is invalid")
+        if (
+            now.tzinfo is None
+            or now.utcoffset() is None
+            or lease_expires_at.tzinfo is None
+            or lease_expires_at.utcoffset() is None
+            or lease_expires_at <= now
+        ):
+            raise ValueError("Execution lease timestamps are invalid")

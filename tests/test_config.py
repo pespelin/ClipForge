@@ -18,6 +18,7 @@ def test_youtube_settings_default_to_local_and_none() -> None:
     settings = get_settings()
 
     assert settings.publishing_provider == "local"
+    assert settings.publishing_execution_lease_seconds == 900
     assert settings.youtube_oauth_client_id is None
     assert settings.youtube_oauth_client_secret is None
     assert settings.youtube_oauth_redirect_uri is None
@@ -36,6 +37,24 @@ def test_supported_publishing_providers_are_accepted(
 
 def test_unsupported_publishing_provider_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PUBLISHING_PROVIDER", "unsupported")
+
+    with pytest.raises(ValidationError):
+        get_settings()
+
+
+def test_publishing_execution_lease_is_parsed_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PUBLISHING_EXECUTION_LEASE_SECONDS", "1200")
+
+    assert get_settings().publishing_execution_lease_seconds == 1200
+
+
+@pytest.mark.parametrize("invalid_seconds", ["0", "-1"])
+def test_publishing_execution_lease_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, invalid_seconds: str
+) -> None:
+    monkeypatch.setenv("PUBLISHING_EXECUTION_LEASE_SECONDS", invalid_seconds)
 
     with pytest.raises(ValidationError):
         get_settings()

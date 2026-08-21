@@ -221,6 +221,29 @@ class PublishingExecutionLockUnavailableError(PublishingError):
         super().__init__("Publishing execution is temporarily busy")
 
 
+class PublishingExecutionLeaseUnavailableError(PublishingError):
+    status_code = 503
+    detail = "Publishing execution is already in progress"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing execution is already in progress")
+
+
+class PublishingExecutionOwnerUnavailableError(PublishingError):
+    status_code = 503
+    detail = "Publishing execution owner is unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing execution owner is unavailable")
+
+
+class PublishingUploadSessionNotFoundError(PublishingError):
+    detail = "Publishing upload session is unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("Publishing upload session is unavailable")
+
+
 class PublishingRateLimitError(PublishingTransientError):
     status_code = 429
     detail = "Publishing provider rate limit exceeded"

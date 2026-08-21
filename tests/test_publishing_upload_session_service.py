@@ -1,5 +1,11 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
+from app.core.exceptions import (
+    PublishingExecutionLeaseUnavailableError,
+    PublishingUploadSessionNotFoundError,
+)
 from app.models.publish_job import PublishPlatform
 from app.models.publishing_upload_session import PublishingUploadSession
 from app.security import CredentialEncryptionError
@@ -152,3 +158,134 @@ async def test_encryption_failure_prevents_partial_persistence() -> None:
     assert repository.created == []
     assert repository.saved == []
     assert SESSION_URI not in repr(error.value)
+
+
+NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def leased_entity(
+    *,
+    owner: str | None = None,
+    expires_at: datetime | None = None,
+) -> PublishingUploadSession:
+    return PublishingUploadSession(
+        publish_job_id=7,
+        platform=PublishPlatform.YOUTUBE,
+        encrypted_session_uri="encrypted:value",
+        total_bytes=10,
+        execution_owner=owner,
+        execution_lease_expires_at=expires_at,
+    )
+
+
+async def test_acquire_execution_lease_without_active_owner() -> None:
+    entity = leased_entity()
+    repository = FakeRepository(entity)
+
+    result = await make_service(repository).acquire_execution_lease(
+        7,
+        owner="task-owner-a",
+        now=NOW,
+        lease_expires_at=NOW + timedelta(seconds=900),
+    )
+
+    assert result is entity
+    assert entity.execution_owner == "task-owner-a"
+    assert entity.execution_lease_expires_at == NOW + timedelta(seconds=900)
+    assert repository.saved == [entity]
+
+
+async def test_same_owner_reacquire_updates_expiry() -> None:
+    entity = leased_entity(owner="task-owner-a", expires_at=NOW + timedelta(seconds=100))
+    repository = FakeRepository(entity)
+    new_expiry = NOW + timedelta(seconds=900)
+
+    await make_service(repository).acquire_execution_lease(
+        7,
+        owner="task-owner-a",
+        now=NOW,
+        lease_expires_at=new_expiry,
+    )
+
+    assert entity.execution_lease_expires_at == new_expiry
+    assert repository.saved == [entity]
+
+
+@pytest.mark.parametrize("current_expiry", [NOW, NOW - timedelta(seconds=1)])
+async def test_expired_lease_allows_takeover(current_expiry: datetime) -> None:
+    entity = leased_entity(owner="task-owner-a", expires_at=current_expiry)
+    repository = FakeRepository(entity)
+
+    await make_service(repository).acquire_execution_lease(
+        7,
+        owner="task-owner-b",
+        now=NOW,
+        lease_expires_at=NOW + timedelta(seconds=900),
+    )
+
+    assert entity.execution_owner == "task-owner-b"
+    assert repository.saved == [entity]
+
+
+async def test_active_other_owner_lease_is_not_mutated() -> None:
+    expiry = NOW + timedelta(seconds=60)
+    entity = leased_entity(owner="task-owner-a", expires_at=expiry)
+    repository = FakeRepository(entity)
+
+    with pytest.raises(PublishingExecutionLeaseUnavailableError):
+        await make_service(repository).acquire_execution_lease(
+            7,
+            owner="task-owner-b",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=900),
+        )
+
+    assert entity.execution_owner == "task-owner-a"
+    assert entity.execution_lease_expires_at == expiry
+    assert repository.saved == []
+
+
+async def test_acquire_missing_checkpoint_is_controlled() -> None:
+    with pytest.raises(PublishingUploadSessionNotFoundError):
+        await make_service(FakeRepository()).acquire_execution_lease(
+            7,
+            owner="task-owner-a",
+            now=NOW,
+            lease_expires_at=NOW + timedelta(seconds=900),
+        )
+
+
+async def test_release_only_matching_owner() -> None:
+    entity = leased_entity(owner="task-owner-a", expires_at=NOW + timedelta(seconds=60))
+    repository = FakeRepository(entity)
+    service = make_service(repository)
+
+    assert await service.release_execution_lease(7, owner="task-owner-b") is False
+    assert entity.execution_owner == "task-owner-a"
+    assert repository.saved == []
+    assert await service.release_execution_lease(7, owner="task-owner-a") is True
+    assert entity.execution_owner is None
+    assert entity.execution_lease_expires_at is None
+    assert repository.saved == [entity]
+
+
+@pytest.mark.parametrize(
+    ("now", "expiry"),
+    [
+        (datetime(2030, 1, 1), NOW + timedelta(seconds=1)),
+        (NOW, datetime(2030, 1, 1, 0, 0, 1)),
+        (NOW, NOW),
+    ],
+)
+async def test_acquire_rejects_invalid_lease_timestamps(now: datetime, expiry: datetime) -> None:
+    repository = FakeRepository(leased_entity())
+
+    with pytest.raises(ValueError):
+        await make_service(repository).acquire_execution_lease(
+            7,
+            owner="task-owner-a",
+            now=now,
+            lease_expires_at=expiry,
+        )
+
+    assert repository.saved == []

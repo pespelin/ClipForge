@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     pexels_api_key: str | None = Field(default=None, repr=False)
 
     publishing_provider: Literal["local", "youtube"] = "local"
+    publishing_execution_lease_seconds: int = Field(default=900, gt=0)
     youtube_oauth_client_id: str | None = None
     youtube_oauth_client_secret: SecretStr | None = None
     youtube_oauth_redirect_uri: str | None = None

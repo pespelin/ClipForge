@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from app.core.exceptions import (
     PublishingAuthenticationError,
     PublishingError,
+    PublishingExecutionLeaseUnavailableError,
     PublishingExecutionLockUnavailableError,
     PublishingPermanentError,
     PublishingQuotaExceededError,
@@ -138,7 +139,10 @@ async def test_youtube_task_composes_managed_http_and_checkpoint_dependencies(
                 remote_media_id="youtube-123",
             )
 
-    settings = SimpleNamespace(publishing_provider="youtube")
+    settings = SimpleNamespace(
+        publishing_provider="youtube",
+        publishing_execution_lease_seconds=900,
+    )
     factory = Mock(
         return_value=SimpleNamespace(
             provider=provider,
@@ -272,6 +276,37 @@ async def test_lock_contention_rolls_back_without_execute_or_commit(monkeypatch)
     assert session.rollbacks == 1
 
 
+async def test_lease_contention_rolls_back_without_execute_or_commit(monkeypatch) -> None:
+    events = []
+
+    class OrderedSession(FakeSession):
+        async def rollback(self) -> None:
+            events.append("rollback")
+            await super().rollback()
+
+    class ContendedService:
+        def __init__(self, **dependencies) -> None:
+            pass
+
+        async def prepare_publish_job_execution(self, publish_job_id: int):
+            events.append("prepare")
+            raise PublishingExecutionLeaseUnavailableError
+
+        async def execute_prepared_publish(self, plan):
+            events.append("execute")
+            raise AssertionError("media transfer must not start")
+
+    session = OrderedSession()
+    patch_dependencies(monkeypatch, session, ContendedService)
+
+    with pytest.raises(PublishingExecutionLeaseUnavailableError):
+        await task_module._run_publishing(7, execution_owner="task-owner-b")
+
+    assert events == ["prepare", "rollback"]
+    assert session.commits == 0
+    assert session.rollbacks == 1
+
+
 async def test_final_commit_failure_rolls_back_after_remote_completion(monkeypatch) -> None:
     events = []
 
@@ -342,7 +377,9 @@ async def test_provider_failure_after_checkpoint_commits_failed_state(monkeypatc
 def test_sync_entrypoint_runs_async_helper_and_is_registered(monkeypatch, caplog) -> None:
     caplog.set_level(logging.INFO, logger="app.tasks.publishing")
 
-    async def fake_run(publish_job_id: int) -> dict[str, int | str | None]:
+    async def fake_run(
+        publish_job_id: int, execution_owner: str | None = None
+    ) -> dict[str, int | str | None]:
         return {
             "publish_job_id": publish_job_id,
             "publish_status": "published",
@@ -562,7 +599,7 @@ async def test_cancelled_and_not_due_jobs_never_call_provider(
 
 
 def test_operational_error_uses_bounded_celery_retry(monkeypatch) -> None:
-    async def fail_with_operational_error(publish_job_id: int):
+    async def fail_with_operational_error(publish_job_id: int, execution_owner: str | None = None):
         raise OperationalError("SELECT 1", {}, RuntimeError("database unavailable"))
 
     retry = Mock(side_effect=Retry())
@@ -583,7 +620,7 @@ def test_lock_contention_uses_safe_bounded_celery_retry(monkeypatch, caplog) -> 
     error = PublishingExecutionLockUnavailableError()
     error.__cause__ = RuntimeError(raw_secret)
 
-    async def fail(publish_job_id: int):
+    async def fail(publish_job_id: int, execution_owner: str | None = None):
         raise error
 
     retry = Mock(side_effect=Retry())
@@ -602,6 +639,31 @@ def test_lock_contention_uses_safe_bounded_celery_retry(monkeypatch, caplog) -> 
     assert raw_secret not in caplog.text
 
 
+def test_lease_contention_uses_safe_bounded_retry_without_owner_leak(monkeypatch, caplog) -> None:
+    owner = "task-owner-secret-16c"
+    error = PublishingExecutionLeaseUnavailableError()
+
+    async def fail(publish_job_id: int, execution_owner: str | None = None):
+        assert execution_owner == owner
+        raise error
+
+    retry = Mock(side_effect=Retry())
+    caplog.set_level(logging.WARNING, logger="app.tasks.publishing")
+    monkeypatch.setattr(task_module, "_run_publishing", fail)
+    monkeypatch.setattr(task_module.execute_publish, "retry", retry)
+    task_module.execute_publish.push_request(id=owner)
+    try:
+        with pytest.raises(Retry):
+            task_module.execute_publish.run(7)
+    finally:
+        task_module.execute_publish.pop_request()
+
+    retry.assert_called_once_with(exc=error, countdown=5)
+    assert "failure_category=lease_contention" in caplog.text
+    assert "retry_after_seconds=5" in caplog.text
+    assert owner not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("error", "expected_countdown"),
     [
@@ -615,7 +677,7 @@ def test_retryable_publishing_errors_use_bounded_celery_retry(
 ) -> None:
     caplog.set_level(logging.WARNING, logger="app.tasks.publishing")
 
-    async def fail(publish_job_id: int):
+    async def fail(publish_job_id: int, execution_owner: str | None = None):
         raise error
 
     retry = Mock(side_effect=Retry())
@@ -646,7 +708,7 @@ def test_non_retryable_publishing_errors_do_not_auto_retry(
 ) -> None:
     caplog.set_level(logging.ERROR, logger="app.tasks.publishing")
 
-    async def fail(publish_job_id: int):
+    async def fail(publish_job_id: int, execution_owner: str | None = None):
         raise error
 
     retry = Mock(side_effect=AssertionError("retry must not run"))

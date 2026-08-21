@@ -8,7 +8,9 @@ from sqlalchemy.exc import OperationalError
 from app.core.config import get_settings
 from app.core.exceptions import (
     PublishingError,
+    PublishingExecutionLeaseUnavailableError,
     PublishingExecutionLockUnavailableError,
+    PublishingExecutionOwnerUnavailableError,
     PublishingRateLimitError,
     PublishingTransientError,
 )
@@ -23,7 +25,10 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
+async def _run_publishing(
+    publish_job_id: int,
+    execution_owner: str | None = None,
+) -> dict[str, int | str | None]:
     async with AsyncExitStack() as stack:
         session = await stack.enter_async_context(AsyncSessionLocal())
         settings = get_settings()
@@ -42,6 +47,8 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
             publish_job_repository=PublishJobRepository(session),
             publishing_provider=composition.provider,
             upload_session_service=composition.upload_session_service,
+            execution_owner=execution_owner,
+            execution_lease_seconds=settings.publishing_execution_lease_seconds,
         )
         try:
             plan = await service.prepare_publish_job_execution(publish_job_id)
@@ -64,7 +71,11 @@ async def _run_publishing(publish_job_id: int) -> dict[str, int | str | None]:
                 )
             publish_job = await service.execute_prepared_publish(plan)
             await session.commit()
-        except PublishingExecutionLockUnavailableError:
+        except (
+            PublishingExecutionLeaseUnavailableError,
+            PublishingExecutionLockUnavailableError,
+            PublishingExecutionOwnerUnavailableError,
+        ):
             await session.rollback()
             raise
         except PublishingError:
@@ -91,13 +102,25 @@ def execute_publish(self, publish_job_id: int) -> dict[str, int | str | None]:
     """Compose publishing dependencies and run async orchestration."""
     logger.info("publishing.execution.started publish_job_id=%s", publish_job_id)
     try:
-        result = asyncio.run(_run_publishing(publish_job_id))
+        result = asyncio.run(
+            _run_publishing(
+                publish_job_id,
+                execution_owner=self.request.id,
+            )
+        )
         logger.info(
             "publishing.execution.succeeded publish_job_id=%s status=%s",
             publish_job_id,
             result["publish_status"],
         )
         return result
+    except PublishingExecutionLeaseUnavailableError as error:
+        logger.warning(
+            "publishing.execution.retry_scheduled publish_job_id=%s "
+            "failure_category=lease_contention retry_after_seconds=5",
+            publish_job_id,
+        )
+        raise self.retry(exc=error, countdown=5) from error
     except PublishingExecutionLockUnavailableError as error:
         logger.warning(
             "publishing.execution.retry_scheduled publish_job_id=%s "

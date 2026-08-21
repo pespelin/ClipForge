@@ -10,6 +10,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    String,
     Text,
     UniqueConstraint,
     func,
@@ -42,6 +43,11 @@ class PublishingUploadSession(Base):
             "next_byte_offset >= 0 AND next_byte_offset < total_bytes",
             name="ck_publishing_upload_sessions_offset_in_range",
         ),
+        CheckConstraint(
+            "(execution_owner IS NULL AND execution_lease_expires_at IS NULL) OR "
+            "(execution_owner IS NOT NULL AND execution_lease_expires_at IS NOT NULL)",
+            name="ck_publishing_upload_sessions_execution_lease_paired",
+        ),
         UniqueConstraint(
             "publish_job_id",
             name="uq_publishing_upload_sessions_publish_job_id",
@@ -65,6 +71,10 @@ class PublishingUploadSession(Base):
     encrypted_session_uri: Mapped[str] = mapped_column(Text, nullable=False)
     total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     next_byte_offset: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    execution_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    execution_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

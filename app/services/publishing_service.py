@@ -1,6 +1,7 @@
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import ValidationError
@@ -8,6 +9,8 @@ from pydantic import ValidationError
 from app.core.exceptions import (
     PublishCancellationConflictError,
     PublishingError,
+    PublishingExecutionLeaseUnavailableError,
+    PublishingExecutionOwnerUnavailableError,
     PublishJobCancelledError,
     PublishJobNotFoundError,
     PublishNotDueError,
@@ -44,6 +47,7 @@ class PublishingExecutionPlan:
     resumable_session: ResumablePublishingSession | None
     requires_pre_execution_commit: bool
     checkpoint_created: bool = False
+    execution_owner: str | None = None
     already_complete: bool = False
 
 
@@ -54,11 +58,17 @@ class PublishingService:
         publish_job_repository: PublishJobRepository,
         publishing_provider: PublishingProvider,
         upload_session_service: PublishingUploadSessionService | None = None,
+        execution_owner: str | None = None,
+        execution_lease_seconds: int = 900,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.video_render_repository = video_render_repository
         self.publish_job_repository = publish_job_repository
         self.publishing_provider = publishing_provider
         self.upload_session_service = upload_session_service
+        self.execution_owner = execution_owner
+        self.execution_lease_seconds = execution_lease_seconds
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     async def create_publish_job(self, video_render_id: int, request: PublishRequest) -> PublishJob:
         validated_request = PublishRequest.model_validate(request)
@@ -144,26 +154,27 @@ class PublishingService:
             raise PublishJobCancelledError
         self._verify_due(publish_job)
 
-        publish_job.status = PublishStatus.PUBLISHING
-        publish_job.completed_at = None
-        publish_job.error_message = None
-        await self.publish_job_repository.save(publish_job)
-
         try:
-            publishing_input = self._build_publishing_input(publish_job)
             if not resumable_provider:
+                await self._mark_publishing(publish_job)
+                publishing_input = self._build_publishing_input(publish_job)
                 return PublishingExecutionPlan(
                     publish_job=publish_job,
                     publishing_input=publishing_input,
                     resumable_session=None,
                     requires_pre_execution_commit=False,
                 )
+            publishing_input = self._build_publishing_input(publish_job)
             if self.upload_session_service is None:
                 raise RuntimeError("Resumable upload persistence is not composed")
+            if not self.execution_owner:
+                raise PublishingExecutionOwnerUnavailableError
             persisted = await self.upload_session_service.get_by_publish_job_id(publish_job.id)
             if persisted is not None:
                 if persisted.platform != publish_job.platform:
                     raise ValueError("Persisted upload session platform mismatch")
+                await self._acquire_execution_lease(publish_job.id)
+                await self._mark_publishing(publish_job)
                 return PublishingExecutionPlan(
                     publish_job=publish_job,
                     publishing_input=publishing_input,
@@ -173,6 +184,7 @@ class PublishingService:
                         next_byte_offset=persisted.next_byte_offset,
                     ),
                     requires_pre_execution_commit=True,
+                    execution_owner=self.execution_owner,
                 )
 
             session = await self.publishing_provider.initiate_upload(publishing_input)
@@ -185,13 +197,21 @@ class PublishingService:
                     next_byte_offset=session.next_byte_offset,
                 )
             )
+            await self._acquire_execution_lease(publish_job.id)
+            await self._mark_publishing(publish_job)
             return PublishingExecutionPlan(
                 publish_job=publish_job,
                 publishing_input=publishing_input,
                 resumable_session=session,
                 requires_pre_execution_commit=True,
                 checkpoint_created=True,
+                execution_owner=self.execution_owner,
             )
+        except (
+            PublishingExecutionLeaseUnavailableError,
+            PublishingExecutionOwnerUnavailableError,
+        ):
+            raise
         except Exception as error:
             await self._mark_failed(publish_job, error)
             if isinstance(error, PublishingError):
@@ -224,6 +244,13 @@ class PublishingService:
                 await self.upload_session_service.delete_by_publish_job_id(publish_job.id)
             return await self.publish_job_repository.save(publish_job)
         except Exception as error:
+            if plan.resumable_session is not None and plan.execution_owner is not None:
+                if self.upload_session_service is None:
+                    raise RuntimeError("Resumable upload persistence is not composed") from error
+                await self.upload_session_service.release_execution_lease(
+                    publish_job.id,
+                    owner=plan.execution_owner,
+                )
             await self._mark_failed(publish_job, error)
             if isinstance(error, PublishingError):
                 raise
@@ -234,6 +261,23 @@ class PublishingService:
         publish_job.completed_at = None
         publish_job.error_message = self._error_message(error)
         await self.publish_job_repository.save(publish_job)
+
+    async def _mark_publishing(self, publish_job: PublishJob) -> None:
+        publish_job.status = PublishStatus.PUBLISHING
+        publish_job.completed_at = None
+        publish_job.error_message = None
+        await self.publish_job_repository.save(publish_job)
+
+    async def _acquire_execution_lease(self, publish_job_id: int) -> None:
+        if self.upload_session_service is None or self.execution_owner is None:
+            raise PublishingExecutionOwnerUnavailableError
+        now = self.clock()
+        await self.upload_session_service.acquire_execution_lease(
+            publish_job_id,
+            owner=self.execution_owner,
+            now=now,
+            lease_expires_at=now + timedelta(seconds=self.execution_lease_seconds),
+        )
 
     async def get_publish_job(self, publish_job_id: int) -> PublishJob:
         publish_job = await self.publish_job_repository.get(publish_job_id)
